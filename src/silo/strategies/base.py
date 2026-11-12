@@ -15,6 +15,8 @@ class Strategy:
 
     name = "strategy"
     uses_llm = False
+    # Parameter values the lab may choose between in walk-forward tests.
+    param_grid: dict[str, list] = {}
 
     def __init__(self, symbols: list[str]) -> None:
         if not symbols:

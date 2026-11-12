@@ -60,6 +60,7 @@ class SmaCross(_PerSymbolSwitch):
     """Long while the fast moving average is above the slow one (50/200)."""
 
     name = "sma_cross"
+    param_grid = {"fast": [20, 50], "slow": [100, 200]}
 
     def __init__(self, symbols, fast: int = 50, slow: int = 200):
         super().__init__(symbols)
@@ -73,6 +74,7 @@ class DonchianBreakout(_PerSymbolSwitch):
     """Turtle-style: enter on a 20-day high, exit on a 10-day low."""
 
     name = "donchian"
+    param_grid = {"entry": [20, 55], "exit": [10, 20]}
 
     def __init__(self, symbols, entry: int = 20, exit: int = 10):
         super().__init__(symbols)
@@ -99,6 +101,7 @@ class Rsi2MeanReversion(_PerSymbolSwitch):
     """Buy short-term dips (RSI(2) < 10) in an uptrend (above 200-day MA)."""
 
     name = "rsi2"
+    param_grid = {"entry": [5, 10], "exit": [60, 70]}
 
     def __init__(self, symbols, length: int = 2, entry: float = 10, exit: float = 70, trend: int = 200):
         super().__init__(symbols)
@@ -116,6 +119,7 @@ class BollingerFade(_PerSymbolSwitch):
     """Buy a close below the lower band, sell back at the middle band."""
 
     name = "bollinger"
+    param_grid = {"length": [20, 40], "width": [1.5, 2.0]}
 
     def __init__(self, symbols, length: int = 20, width: float = 2.0):
         super().__init__(symbols)
@@ -133,6 +137,7 @@ class Momentum12_1(Strategy):
     """Monthly: hold the top-k symbols by 12-month return, skipping the last month."""
 
     name = "momentum"
+    param_grid = {"lookback": [126, 252], "top_k": [1, 2]}
 
     def __init__(self, symbols, lookback: int = 252, skip: int = 21, top_k: int = 3):
         super().__init__(symbols)

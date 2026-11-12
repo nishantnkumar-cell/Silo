@@ -26,6 +26,26 @@ strategy is run on full data and on data cut at day T, and its decisions
 before T must be identical. If deleting the future changes the past, something
 is peeking.
 
+## Phase 1: backtest lab
+
+`silo lab` runs one honest study per strategy and writes an HTML report:
+
+| Check | File | What it does |
+| --- | --- | --- |
+| Walk-forward | `src/silo/lab/walkforward.py` | Picks parameters on past data only, then trades the next window untouched. Test windows are stitched into one out-of-sample curve. |
+| Locked holdout | `src/silo/lab/holdout.py` | The last 20% of data is never used for research. `--open-holdout` evaluates it once and logs it; a second opening is flagged as no longer clean. |
+| Random control | `src/silo/lab/controls.py`, `strategies/random_entry.py` | 30 strategies with no information that trade as often and stay as invested as the real one. |
+| Luck statistics | `src/silo/lab/stats.py` | Deflated Sharpe ratio (penalises trying many parameter sets), probabilistic Sharpe, block-bootstrap interval. |
+| Report | `src/silo/lab/report.py` | Verdict, pass/fail checks, interactive equity chart against buy-and-hold and the random band, fold table, holdout. Light and dark mode. |
+
+A strategy is only called interesting when it beats buy-and-hold after costs,
+survives the deflated Sharpe test, beats 95% of random controls, and (when
+opened) beats buy-and-hold on the holdout.
+
+On synthetic random walks, the Bollinger fade beats buy-and-hold and 97% of
+random strategies, and even wins on the holdout, yet the deflated Sharpe test
+(0.77) still flags it as likely luck. That is the lab doing its job.
+
 ## Quick start
 
 ```bash
@@ -36,6 +56,9 @@ silo demo                                   # offline, synthetic data
 silo fetch SPY QQQ IWM TLT GLD              # free daily bars from Yahoo
 silo backtest SPY QQQ IWM TLT GLD           # every baseline vs buy-and-hold
 silo backtest SPY --strategy sma_cross --start 2015-01-01
+silo lab --demo --strategy bollinger        # offline lab study -> reports/bollinger.html
+silo lab SPY QQQ IWM TLT GLD                 # every strategy, one report each
+silo lab SPY QQQ IWM TLT GLD --strategy momentum --open-holdout   # final check, once
 pytest
 ```
 
@@ -43,7 +66,6 @@ pytest
 
 ## Next phases
 
-1. Backtest lab: walk-forward splits, deflated Sharpe, random-entry control, HTML report.
 2. Agent desk: analyst, debate and trader agents (local models plus Claude), amnesia test, cutoff tagging.
 3. Experiments: strategy evolution, regime router, synthetic sandbox, Kronos forecasts.
 4. Paper loop: daily paper runs, thesis journal, weekly review.
