@@ -73,6 +73,7 @@ class SimBroker:
     cash: float = 100_000.0
     costs: CostModel = field(default_factory=CostModel)
     min_trade_value: float = 50.0
+    max_participation: float | None = None  # cap each fill at this share of the day's volume
     positions: dict[str, float] = field(default_factory=dict)
     opened_at: dict[str, pd.Timestamp] = field(default_factory=dict)
     pending: list[Order] = field(default_factory=list)
@@ -110,8 +111,14 @@ class SimBroker:
                 self.cash += qty * amount
                 self.dividends.append({"date": date, "symbol": symbol, "qty": qty, "per_share": amount})
 
-    def fill_at_open(self, opens: dict[str, float], date: pd.Timestamp) -> None:
-        """Fill queued orders at ``date``'s open. Sells go first to free cash."""
+    def fill_at_open(
+        self, opens: dict[str, float], date: pd.Timestamp, volumes: dict[str, float] | None = None
+    ) -> None:
+        """Fill queued orders at ``date``'s open. Sells go first to free cash.
+
+        With ``max_participation`` set and ``volumes`` given, a fill is capped
+        at that share of the day's volume and the rest waits for the next open.
+        """
         orders, self.pending = sorted(self.pending, key=lambda o: o.qty), []
         for order in orders:
             if order.symbol not in opens or pd.isna(opens[order.symbol]):
@@ -119,6 +126,14 @@ class SimBroker:
             side = 1 if order.qty > 0 else -1
             price = self.costs.fill_price(opens[order.symbol], side)
             qty = order.qty
+            if self.max_participation is not None and volumes is not None:
+                room = self.max_participation * float(volumes.get(order.symbol) or 0.0)
+                if abs(qty) > room:
+                    rest = qty - side * room
+                    qty = side * room
+                    self.pending.append(Order(order.symbol, rest, order.decided_at))
+                    if not room:
+                        continue
             if side > 0:
                 per_share = price * (1 + self.costs.stamp_duty_bps / 1e4)
                 affordable = (self.cash - self.costs.commission(qty)) / per_share

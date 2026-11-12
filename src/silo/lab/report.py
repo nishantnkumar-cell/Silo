@@ -9,6 +9,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from silo.lab.regimes import regime_table
 from silo.lab.study import ANNUAL, LabResult
 
 DISCLAIMER = "Research only. Simulated results, not financial advice. Silo never trades real money."
@@ -58,6 +59,20 @@ def _metrics_rows(rows: list[tuple[str, dict]]) -> str:
             f"<td>{_num(m.get('round_trips'), 0)}</td><td>{_num(m.get('avg_hold_days'), 0)}</td></tr>"
         )
     return "\n".join(out)
+
+
+def _regime_html(result: LabResult) -> str:
+    rows = regime_table(result.oos_equity, result.benchmark.equity)
+    if not rows:
+        return "<p class='muted'>Not enough out-of-sample history to label market conditions.</p>"
+    body = "\n".join(
+        f"<tr><th scope='row'>{html.escape(r['state'])}</th><td>{r['days']}</td><td>{_pct(r['strategy'])}</td>"
+        f"<td>{_pct(r['benchmark'])}</td><td>{_pct(r['strategy'] - r['benchmark'])}</td></tr>"
+        for r in rows
+    )
+    return ("<div class='scroll'><table><thead><tr><th scope='col'>Market state</th><th scope='col'>Days</th>"
+            "<th scope='col'>Strategy</th><th scope='col'>Buy-and-hold</th><th scope='col'>Difference</th></tr></thead>"
+            f"<tbody>{body}</tbody></table></div>")
 
 
 def render(result: LabResult) -> str:
@@ -132,6 +147,7 @@ def render(result: LabResult) -> str:
         dsr=_num(result.dsr),
         trials=wf.n_trials,
         folds=folds,
+        regimes=_regime_html(result),
         holdout=holdout_html,
         data_rows=data_rows,
         charts=json.dumps(charts),
@@ -209,6 +225,10 @@ details {{ margin-top: 8px; }}
 <div class="scroll"><table><thead><tr><th scope="col"></th><th scope="col">Total return</th><th scope="col">CAGR</th><th scope="col">Sharpe</th><th scope="col">Volatility</th><th scope="col">Max drawdown</th><th scope="col">Round trips</th><th scope="col">Avg hold (days)</th></tr></thead>
 <tbody>{metrics}</tbody></table></div>
 <p class="muted">Strategy Sharpe 95% bootstrap interval: {ci}. Deflated Sharpe ratio: {dsr} after {trials} parameter trials; 0.95 or more means the result is unlikely to be the luckiest of many tries.</p>
+
+<h2>By market conditions</h2>
+<p class="muted">Return earned on the days in each state, out of sample. States come from the benchmark's own past: the trend over the previous three months and whether recent volatility is above its one-year median.</p>
+{regimes}
 
 <h2>Walk-forward folds</h2>
 <div class="scroll"><table><thead><tr><th scope="col">Training window</th><th scope="col">Test window</th><th scope="col">Chosen parameters</th><th scope="col">Train Sharpe</th><th scope="col">Test Sharpe</th></tr></thead>

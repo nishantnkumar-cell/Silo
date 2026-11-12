@@ -200,9 +200,9 @@ class TrendQuality(Strategy):
     """
 
     name = "uk_trend"
-    param_grid = {"lookback": [126, 252], "top_k": [5, 8]}
+    param_grid = {"lookback": [126, 252], "top_k": [15, 25]}
 
-    def __init__(self, symbols, lookback: int = 126, skip: int = 5, top_k: int = 8, trend: int = 200):
+    def __init__(self, symbols, lookback: int = 126, skip: int = 5, top_k: int = 20, trend: int = 200):
         super().__init__(symbols)
         self.lookback, self.skip, self.top_k, self.trend = lookback, skip, top_k, trend
 

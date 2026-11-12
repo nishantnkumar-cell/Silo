@@ -5,6 +5,11 @@ listings (Yahoo ``.L`` tickers). It is today's list, so backtests on it carry
 survivorship bias: companies that fell out of the index are missing. Fetch
 failures (delisted or renamed tickers) are skipped and reported.
 
+No penny stocks or thin names: :func:`screen` rejects shares under £1 or
+trading less than £5m a day, and the engine enforces the same floors at every
+decision (see :mod:`silo.liquidity`), so a strategy cannot buy its way around
+the screen.
+
 Two screens:
 * :func:`screen` uses prices only and is point-in-time: pass a view's clock
   and it only looks at bars public by then.
@@ -26,7 +31,16 @@ UK_CANDIDATES = [
     "CRDA.L", "AUTO.L", "RMV.L", "III.L", "BNZL.L", "ANTO.L", "ENT.L", "BDEV.L", "PSN.L", "TW.L",
     "BKG.L", "IAG.L", "EZJ.L", "WPP.L", "INF.L", "PSON.L", "SN.L", "MNDI.L", "STAN.L", "ADM.L",
     "JD.L", "KGF.L", "UU.L", "SVT.L", "HWDN.L", "DPLM.L", "GAW.L", "IMI.L", "WEIR.L", "RTO.L",
+    # more FTSE 100 and liquid FTSE 250 names
+    "BEZ.L", "HIK.L", "BRBY.L", "CNA.L", "DCC.L", "FRES.L", "MRO.L", "LAND.L", "BLND.L", "SGRO.L",
+    "PHNX.L", "SDR.L", "SMDS.L", "JMAT.L", "BME.L", "ICG.L", "HSX.L", "LMP.L", "MNG.L", "BBY.L",
+    "BWY.L", "CCC.L", "DLN.L", "DRX.L", "FRAS.L", "GRG.L", "INCH.L", "IGG.L", "TPK.L", "VTY.L",
+    "HTWS.L", "ITV.L", "PAGE.L", "QQ.L", "ROR.L", "RS1.L", "SXS.L", "SRP.L", "TATE.L", "TRN.L",
+    "VSVS.L", "WOSG.L", "BAB.L", "SPT.L", "FOUR.L", "GNS.L", "JET2.L", "OCDO.L", "PFD.L", "PNN.L",
+    "RAT.L", "RWS.L", "SAFE.L", "AJB.L", "PLUS.L", "CRST.L", "BOY.L", "KNOS.L", "HILS.L", "EMG.L",
+    "BYG.L", "UTG.L", "DOM.L", "MTO.L", "CKN.L", "HAS.L", "BAG.L", "ASHM.L", "JUP.L", "QLT.L",
 ]
+UK_CANDIDATES = list(dict.fromkeys(UK_CANDIDATES))  # keep order, drop repeats
 
 
 def screen(
@@ -34,6 +48,7 @@ def screen(
     asof: pd.Timestamp | None = None,
     min_history: int = 252,
     min_value_traded: float = 5e6,
+    min_price: float = 1.0,
     vol_band: tuple[float, float] = (0.20, 0.45),
     max_drawdown: float = -0.5,
 ) -> pd.DataFrame:
@@ -56,7 +71,10 @@ def screen(
         value = float((last["close"] * last["volume"]).iloc[-60:].median())
         dd = float((last["close"] / last["close"].cummax() - 1).min())
         trend = bool(last["close"].iloc[-1] > last["close"].iloc[-200:].mean())
+        price = float(last["close"].iloc[-1])
         reasons = []
+        if price < min_price:
+            reasons.append(f"penny stock: £{price:.2f} a share")
         if value < min_value_traded:
             reasons.append(f"illiquid: £{value / 1e6:.1f}m a day")
         if not vol_band[0] <= vol <= vol_band[1]:
@@ -64,6 +82,7 @@ def screen(
         if dd < max_drawdown:
             reasons.append(f"fell {dd:.0%} in a year")
         rows[symbol] = {
+            "price": price,
             "volatility": vol,
             "value_traded_m": value / 1e6,
             "max_drawdown_1y": dd,

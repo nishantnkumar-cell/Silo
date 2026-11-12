@@ -57,9 +57,11 @@ forward on a paper book.
 | UK prices | `src/silo/data/sources.py`, `data/vault.py` | Yahoo pence converted to pounds, isolated 100x rows repaired. Prices are split-adjusted but not dividend-adjusted; dividends are stored separately and paid as cash on the ex-date. |
 | Snapshots | `src/silo/data/vault.py` | Every fetch is a new dated snapshot; nothing is overwritten. `vault.revisions(symbol)` shows rows a vendor changed. |
 | UK costs | `src/silo/broker.py` | `CostModel.uk()`: 0.5% stamp duty on buys, £5 dealing fee, 20bp spread, 10bp slippage. Picked automatically for `.L` symbols. |
-| Position trading | `src/silo/constraints.py` | Default: decide weekly, hold new positions at least 20 trading days, trade at most 50% of the book per rebalance, cap any name at 20%. Enforced in code. |
-| Universe | `src/silo/universe/uk.py` | 70 liquid London candidates. Price screen (point-in-time): £5m a day traded, 20% to 45% volatility, no 50% crash. Optional quality screen (ROE, margins, debt) from today's fundamentals, for picking the live universe only. |
+| Position trading | `src/silo/constraints.py` | Default: decide weekly, hold new positions at least 20 trading days, trade at most 50% of the book per rebalance, cap any name at 10%. Enforced in code. |
+| Liquidity | `src/silo/liquidity.py` | Hard rules in the engine for every strategy: no penny stocks (under £1), at least £5m traded a day (60-day median), no position bigger than 20% of a day's trading so it can be sold within two days, and each simulated fill limited to 10% of that day's volume. A name that stops passing can be held or trimmed, never added to. |
+| Universe | `src/silo/universe/uk.py` | About 140 liquid FTSE 100 and FTSE 250 candidates. Price screen (point-in-time): at least £1 a share, £5m a day traded, 20% to 45% volatility, no 50% crash. Optional quality screen (ROE, margins, debt) from today's fundamentals, for picking the live universe only. |
 | Strategy | `uk_trend` in `strategies/classic.py` | Names above their 200-day average, ranked by risk-adjusted 6-month momentum, top 8, inverse-volatility sized. |
+| Market conditions | `src/silo/lab/regimes.py` | The lab report splits out-of-sample results into rising, sideways and falling markets, calm and stormy volatility, and the 2020 crash, 2020 rebound and 2022 rate shock, each next to buy-and-hold. |
 | Paper loop | `src/silo/paper.py` | Forward-only book on the simulator with a buy-and-hold shadow book, append-only journal, safe to rerun. Uses the same engine as backtests, so paper and backtest agree to the penny. |
 
 Reports now show round trips and average holding period.

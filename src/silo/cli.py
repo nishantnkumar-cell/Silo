@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pandas as pd
@@ -14,6 +15,7 @@ from silo.constraints import Constraints
 from silo.data.sources import SOURCES, synthetic_bars
 from silo.data.vault import DataVault, normalize_bars
 from silo.engine import run_backtest
+from silo.liquidity import Liquidity
 from silo.markets import market_for_symbols
 from silo.strategies import REGISTRY
 
@@ -37,8 +39,12 @@ def _rules(args, symbols) -> dict:
     costs = {"auto": CostModel.for_market(market.code) if market else CostModel(), "us": CostModel(),
              "uk": CostModel.uk(), "none": CostModel(0, 0, 0, 0, 0)}[args.costs]
     if args.style == "position":
+        liq = Liquidity.for_market(market.code if market else "UK")
+        liq = replace(liq, **{k: v for k, v in {"min_price": args.min_price,
+                                                 "min_value_traded": args.min_value_traded}.items() if v is not None})
         constraints = Constraints.position_trading(
-            **{k: v for k, v in {"rebalance": args.rebalance, "min_hold_days": args.min_hold}.items() if v is not None}
+            liquidity=liq,
+            **{k: v for k, v in {"rebalance": args.rebalance, "min_hold_days": args.min_hold}.items() if v is not None},
         )
     else:
         constraints = Constraints(rebalance=args.rebalance or "daily", min_hold_days=args.min_hold or 0)
@@ -52,6 +58,10 @@ def _add_rule_flags(p) -> None:
                    help="position: weekly decisions, 20-day minimum hold, turnover and size caps")
     p.add_argument("--rebalance", choices=["daily", "weekly", "monthly"])
     p.add_argument("--min-hold", type=int, help="minimum trading days to hold a new position")
+    p.add_argument("--min-price", type=float,
+                   help="no penny stocks: lowest share price allowed (default £1 in the UK)")
+    p.add_argument("--min-value-traded", type=float,
+                   help="lowest median daily value traded over 60 days (default £5m in the UK)")
 
 
 def cmd_fetch(args) -> int:

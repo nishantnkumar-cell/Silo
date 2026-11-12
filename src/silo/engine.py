@@ -7,7 +7,8 @@ trading day:
 3. the clock moves to today's close and equity is marked;
 4. on a rebalance day the strategy sees a :class:`PointInTimeView` at that
    clock; its target weights pass through the position-trading constraints
-   and become orders for the next open.
+   and become orders for the next open. Liquidity rules (no penny stocks,
+   enough daily trading, positions small enough to sell) apply first.
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ import pandas as pd
 from silo.broker import CostModel, SimBroker
 from silo.constraints import Constraints, apply_constraints, is_rebalance_day
 from silo.firewall import PointInTimeView, PreparedTables
+from silo.liquidity import apply_liquidity
 from silo.metrics import summarize
 from silo.strategies.base import Strategy
 
@@ -47,8 +49,9 @@ class MarketData:
         self.rows = {}
         for s, df in tables.items():
             div = df["dividend"].to_numpy() if "dividend" in df.columns else [0.0] * len(df)
+            vol = df["volume"].to_numpy() if "volume" in df.columns else [float("nan")] * len(df)
             self.rows[s] = dict(
-                zip(df.index, zip(df["open"].to_numpy(), df["close"].to_numpy(), df["available_at"], div))
+                zip(df.index, zip(df["open"].to_numpy(), df["close"].to_numpy(), df["available_at"], div, vol))
             )
         self.dates = sorted(set().union(*(df.index for df in tables.values())))
 
@@ -67,7 +70,11 @@ class Session:
     @classmethod
     def start(cls, strategy, cash=100_000.0, costs=None, constraints=None) -> Session:
         strategy.reset()
-        return cls(strategy, SimBroker(cash=cash, costs=costs or CostModel()), constraints or Constraints())
+        constraints = constraints or Constraints()
+        liq = constraints.liquidity
+        broker = SimBroker(cash=cash, costs=costs or CostModel(),
+                           max_participation=liq.max_participation if liq else None)
+        return cls(strategy, broker, constraints)
 
     def step(self, date: pd.Timestamp, data: MarketData) -> dict:
         """Advance one trading day. Returns what happened, for journals."""
@@ -75,7 +82,8 @@ class Session:
         n_fills = len(self.broker.fills)
         n_divs = len(self.broker.dividends)
         self.broker.credit_dividends({s: float(r[3]) for s, r in today.items() if r[3]}, date)
-        self.broker.fill_at_open({s: float(r[0]) for s, r in today.items()}, date)
+        volumes = {s: float(r[4]) for s, r in today.items()} if self.constraints.liquidity else None
+        self.broker.fill_at_open({s: float(r[0]) for s, r in today.items()}, date, volumes)
         self.last_close.update({s: float(r[1]) for s, r in today.items()})
         for s in list(self.held_days):
             if not self.broker.positions.get(s):
@@ -95,9 +103,17 @@ class Session:
                     self.broker.charge(self.broker.costs.llm_cost_per_decision)
                 if all(s in self.last_close for s in weights):
                     current = self.broker.weights(self.last_close)
-                    final = apply_constraints(weights, current, self.held_days, self.constraints)
+                    blocked = {}
+                    target = weights
+                    if self.constraints.liquidity:
+                        target, blocked = apply_liquidity(
+                            weights, current, view, self.equity[date], self.constraints.liquidity
+                        )
+                    final = apply_constraints(target, current, self.held_days, self.constraints)
                     self.broker.target_weights(final, self.last_close, clock)
                     decision = {"date": date, "clock": clock, "weights": dict(final), "proposed": dict(weights)}
+                    if blocked:
+                        decision["liquidity"] = blocked
                     self.decisions.append(decision)
         self.last_date = date
         return {

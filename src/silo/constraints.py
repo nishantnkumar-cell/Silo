@@ -12,6 +12,8 @@ from dataclasses import dataclass
 
 import pandas as pd
 
+from silo.liquidity import Liquidity
+
 
 @dataclass(frozen=True)
 class Constraints:
@@ -19,11 +21,15 @@ class Constraints:
     min_hold_days: int = 0  # trading days a new position must be held
     max_turnover: float | None = None  # max sum |delta weight| per rebalance
     max_weight: float | None = None  # cap on any one position
+    liquidity: Liquidity | None = None  # see silo.liquidity
+
 
     @classmethod
     def position_trading(cls, **overrides) -> Constraints:
-        """Weeks-to-months defaults: weekly decisions, 20-day minimum hold."""
-        base = dict(rebalance="weekly", min_hold_days=20, max_turnover=0.5, max_weight=0.2)
+        """Weeks-to-months defaults: weekly decisions, 20-day minimum hold,
+        at most 10% in one name, and the liquidity rules on."""
+        base = dict(rebalance="weekly", min_hold_days=20, max_turnover=0.5, max_weight=0.1,
+                    liquidity=Liquidity())
         base.update(overrides)
         return cls(**base)
 

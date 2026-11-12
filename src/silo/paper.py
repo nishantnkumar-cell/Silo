@@ -27,6 +27,7 @@ import pandas as pd
 
 from silo.broker import CostModel
 from silo.constraints import Constraints
+from silo.liquidity import Liquidity
 from silo.data.vault import DataVault
 from silo.engine import MarketData, Session
 from silo.markets import market_for_symbols
@@ -68,7 +69,7 @@ class PaperBook:
         if self.exists:
             raise FileExistsError(f"paper book {self.name!r} already exists")
         market = market_for_symbols(symbols)
-        constraints = constraints or Constraints.position_trading()
+        constraints = constraints or Constraints.position_trading(liquidity=Liquidity.for_market(market.code))
         costs = costs or CostModel.for_market(market.code)
         tables = {s: vault.get_bars(s) for s in symbols}
         start_after = max(df.index[-1] for df in tables.values())
