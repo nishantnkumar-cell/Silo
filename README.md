@@ -64,6 +64,13 @@ forward on a paper book.
 
 Reports now show round trips and average holding period.
 
+**Trading 212 Practice mirror** (`src/silo/brokers/trading212.py`): the
+simulator stays the source of truth; the newest rebalance can also be sent as
+market orders to a Trading 212 *Practice* account (`demo.trading212.com`).
+`live.trading212.com` is on the refused list, `T212_LIVE*` variables stop
+Silo from starting, every order is logged as an intent before it is sent so a
+rerun never duplicates it, and `t212-check` compares the two books.
+
 ## Quick start
 
 ```bash
@@ -79,6 +86,12 @@ silo lab $(python -c "import json;print(' '.join(json.load(open('uk.json'))))") 
 silo paper new uk-trend --symbols-file uk.json --strategy uk_trend
 silo paper run uk-trend --fetch             # once a day after 16:35 London time
 silo paper status uk-trend
+
+# Optional: mirror the paper book to a Trading 212 Practice account (paper money)
+export T212_DEMO_API_KEY=... T212_DEMO_API_SECRET=...   # key created in Practice mode
+silo paper t212-map uk-trend                # propose Yahoo -> Trading 212 tickers; review the file
+silo paper run uk-trend --fetch --mirror t212
+silo paper t212-check uk-trend              # simulator vs Practice account weights
 
 silo fetch SPY QQQ IWM TLT GLD              # free daily bars from Yahoo
 silo backtest SPY QQQ IWM TLT GLD           # every baseline vs buy-and-hold

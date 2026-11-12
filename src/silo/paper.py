@@ -160,3 +160,88 @@ class PaperBook:
             },
             "metrics": summarize(eq, book.result().fills) if len(eq) > 1 else {},
         }
+
+
+class MirrorError(RuntimeError):
+    pass
+
+
+def _mirror_log(book: PaperBook) -> list[dict]:
+    path = book.dir / "mirror.jsonl"
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+
+
+def _mirror_append(book: PaperBook, entry: dict) -> None:
+    with (book.dir / "mirror.jsonl").open("a") as f:
+        f.write(json.dumps(entry, default=_json) + "\n")
+
+
+def load_mapping(book: PaperBook) -> dict[str, str]:
+    path = book.dir / "t212_map.json"
+    if not path.exists():
+        raise MirrorError(f"no ticker map; run `silo paper t212-map {book.name}` and review {path}")
+    return {k: v for k, v in json.loads(path.read_text()).items() if v}
+
+
+def mirror_latest_decision(book: PaperBook, client, fractional: bool = False) -> list[dict]:
+    """Send the newest rebalance to the Trading 212 Practice account, once.
+
+    Only a decision made at the latest processed close is mirrored: when a
+    run catches up several days, older decisions have already been acted on
+    in the simulator and would be stale on the broker. Each order is logged
+    as an intent before it is sent, so a crash or a rerun never sends it twice.
+    """
+    from silo.brokers.trading212 import mirror_orders
+
+    cfg = book.config()
+    session = book._load()["book"]
+    if not session.decisions or session.decisions[-1]["date"] != session.last_date:
+        return []
+    decision = session.decisions[-1]
+    date = pd.Timestamp(decision["date"]).isoformat()
+    log = _mirror_log(book)
+    sent = {(e["decision_date"], e["ticker"]) for e in log if e.get("kind") == "intent"}
+    mapping = load_mapping(book)
+    missing = [s for s in decision["weights"] if s not in mapping]
+    if missing:
+        raise MirrorError(f"no Trading 212 ticker for {missing}; edit {book.dir / 't212_map.json'}")
+    total, currency = client.total_value()
+    if currency and currency != cfg["currency"]:
+        raise MirrorError(f"Practice account is in {currency}, book is in {cfg['currency']}")
+    held = client.positions()
+    orders = mirror_orders(decision["weights"], session.last_close, mapping, held, total, fractional)
+    results = []
+    for ticker, qty in orders:
+        if (date, ticker) in sent:
+            continue
+        _mirror_append(book, {"kind": "intent", "decision_date": date, "ticker": ticker, "quantity": qty,
+                              "at": datetime.now(timezone.utc).isoformat()})
+        try:
+            resp = client.market_order(ticker, qty)
+            entry = {"kind": "sent", "decision_date": date, "ticker": ticker, "quantity": qty,
+                     "order_id": resp.get("id"), "status": resp.get("status")}
+        except Exception as exc:  # noqa: BLE001 - log and continue with the rest
+            entry = {"kind": "error", "decision_date": date, "ticker": ticker, "quantity": qty, "error": str(exc)}
+        _mirror_append(book, entry)
+        results.append(entry)
+    return results
+
+
+def reconcile(book: PaperBook, client) -> pd.DataFrame:
+    """Simulator weights next to Practice-account weights, per symbol."""
+    session = book._load()["book"]
+    mapping = load_mapping(book)
+    sim = session.broker.weights(session.last_close) if session.last_close else {}
+    total, _ = client.total_value()
+    held = client.positions()
+    rows = {}
+    for symbol, ticker in mapping.items():
+        qty = held.get(ticker, 0.0)
+        price = session.last_close.get(symbol)
+        broker_w = qty * price / total if price and total else 0.0
+        if qty or sim.get(symbol):
+            rows[symbol] = {"ticker": ticker, "simulator": sim.get(symbol, 0.0), "practice": broker_w,
+                            "practice_qty": qty}
+    return pd.DataFrame(rows).T

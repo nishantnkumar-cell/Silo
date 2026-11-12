@@ -15,6 +15,8 @@ Silo is a research-only trading lab. These rules are absolute:
 - Silo is for UK position trading (weeks to months). Keep `Constraints.position_trading()`
   as the default for books and CLI runs; no intraday strategies.
 - Prices stay split-adjusted, never dividend-adjusted; dividends are paid as cash.
+- Trading 212 is Practice only: `demo.trading212.com`. Never add `live.trading212.com` or any
+  setting that could point the client at it.
 - Never overwrite a vault snapshot or rewrite a paper journal.
 
 Run `pytest` before pushing.

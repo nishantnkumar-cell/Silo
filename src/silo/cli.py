@@ -156,6 +156,22 @@ def cmd_paper(args) -> int:
 
     vault = DataVault(args.data_dir)
     book = PaperBook(args.name, args.paper_dir)
+    if args.action == "t212-map":
+        from silo.brokers.trading212 import Trading212Demo, propose_mapping
+
+        mapping = propose_mapping(book.config()["symbols"], Trading212Demo().instruments())
+        path = book.dir / "t212_map.json"
+        path.write_text(json.dumps(mapping, indent=2))
+        for sym, t in mapping.items():
+            print(f"  {sym:8s} -> {t or 'NOT FOUND: edit the file by hand'}")
+        print(f"saved to {path}; check every line before mirroring")
+        return 0
+    if args.action == "t212-check":
+        from silo.brokers.trading212 import Trading212Demo
+        from silo.paper import reconcile
+
+        print(reconcile(book, Trading212Demo()).to_string())
+        return 0
     if args.action == "new":
         symbols = args.symbols or json.loads(Path(args.symbols_file).read_text())
         rules = _rules(args, symbols)
@@ -172,6 +188,15 @@ def cmd_paper(args) -> int:
                     print(f"fetch failed for {s}: {exc}")
         events = book.run(vault)
         print(f"processed {len(events)} new trading day(s)")
+        if args.mirror == "t212":
+            from silo.brokers.trading212 import Trading212Demo
+            from silo.paper import mirror_latest_decision
+
+            sent = mirror_latest_decision(book, Trading212Demo(), fractional=args.fractional)
+            print(f"Trading 212 Practice: {len(sent)} order(s) sent" if sent else
+                  "Trading 212 Practice: no new rebalance to mirror")
+            for e in sent:
+                print(f"  {e['ticker']:14s} {e['quantity']:+.4g}  {e.get('status') or e.get('error')}")
         for e in events:
             if e.get("decision") or e["fills"]:
                 print(f"  {pd.Timestamp(e['date']).date()}: {len(e['fills'])} fill(s)"
@@ -224,7 +249,7 @@ def main(argv: list[str] | None = None) -> int:
     u.set_defaults(func=cmd_universe)
 
     pp = sub.add_parser("paper", help="forward paper trading on the simulator")
-    pp.add_argument("action", choices=["new", "run", "status"])
+    pp.add_argument("action", choices=["new", "run", "status", "t212-map", "t212-check"])
     pp.add_argument("name")
     pp.add_argument("--paper-dir", default="paper")
     pp.add_argument("--strategy", choices=STUDY_STRATEGIES, default="uk_trend")
@@ -233,6 +258,8 @@ def main(argv: list[str] | None = None) -> int:
     pp.add_argument("--params", default="{}", help="strategy parameters as JSON")
     pp.add_argument("--cash", type=float, default=100_000.0)
     pp.add_argument("--fetch", action="store_true", help="download fresh bars before running")
+    pp.add_argument("--mirror", choices=["t212"], help="also send the newest rebalance to a Trading 212 Practice account")
+    pp.add_argument("--fractional", action="store_true", help="allow fractional share quantities when mirroring")
     pp.add_argument("--source", choices=sorted(SOURCES), default="yfinance")
     _add_rule_flags(pp)
     pp.set_defaults(func=cmd_paper)
