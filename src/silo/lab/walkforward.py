@@ -36,6 +36,7 @@ class WalkForwardResult:
     oos_returns: pd.Series
     trial_sharpes: list[float] = field(default_factory=list)
     oos_decisions: list[dict] = field(default_factory=list)
+    oos_fills: pd.DataFrame | None = None
 
     @property
     def n_trials(self) -> int:
@@ -91,7 +92,7 @@ def walk_forward(
     dates = sorted(set().union(*(tables[s].index for s in symbols)))
     if end is not None:
         dates = [d for d in dates if d < pd.Timestamp(end)]
-    folds, pieces, trials, decisions = [], [], [], []
+    folds, pieces, trials, decisions, fills = [], [], [], [], []
     for tr0, tr1, te0, te1 in fold_bounds(dates, n_folds, train_frac, max_train):
         best, best_sr, fold_trials = select_params(strategy_cls, symbols, tables, tr0, tr1, grid, **kwargs)
         trials.extend(fold_trials)
@@ -99,5 +100,7 @@ def walk_forward(
         rets = test.equity.pct_change().fillna(0.0)
         pieces.append(rets)
         decisions.extend(test.decisions)
+        fills.append(test.fills)
         folds.append(Fold(tr0, tr1, te0, te1, best, best_sr, sharpe(rets)))
-    return WalkForwardResult(strategy_cls.name, folds, pd.concat(pieces), trials, decisions)
+    all_fills = pd.concat([f for f in fills if not f.empty]) if any(not f.empty for f in fills) else None
+    return WalkForwardResult(strategy_cls.name, folds, pd.concat(pieces), trials, decisions, all_fills)

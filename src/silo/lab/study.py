@@ -45,10 +45,10 @@ class LabResult:
         return self.wf.equity()
 
     def oos_metrics(self) -> dict[str, float]:
-        return summarize(self.oos_equity)
+        return summarize(self.oos_equity, self.wf.oos_fills)
 
     def benchmark_metrics(self) -> dict[str, float]:
-        return summarize(self.benchmark.equity)
+        return summarize(self.benchmark.equity, self.benchmark.fills)
 
     @property
     def interesting(self) -> bool:

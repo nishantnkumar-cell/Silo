@@ -12,4 +12,9 @@ Silo is a research-only trading lab. These rules are absolute:
 - Results are always reported next to buy-and-hold and labelled research only.
 - Never open the locked holdout (`--open-holdout`) to tune a strategy; it is for a final check, and every opening is logged.
 
+- Silo is for UK position trading (weeks to months). Keep `Constraints.position_trading()`
+  as the default for books and CLI runs; no intraday strategies.
+- Prices stay split-adjusted, never dividend-adjusted; dividends are paid as cash.
+- Never overwrite a vault snapshot or rewrite a paper journal.
+
 Run `pytest` before pushing.
