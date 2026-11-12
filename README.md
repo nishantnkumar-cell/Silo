@@ -73,6 +73,22 @@ market orders to a Trading 212 *Practice* account (`demo.trading212.com`).
 Silo from starting, every order is logged as an intent before it is sent so a
 rerun never duplicates it, and `t212-check` compares the two books.
 
+## Dashboard
+
+`silo web` opens a local dashboard at <http://127.0.0.1:8212/> (`src/silo/web.py`, standard library only):
+
+* **Overview**: every paper book with its return next to the buy-and-hold copy, the latest lab reports.
+* **Book page**: equity chart against buy-and-hold, positions, trade journal, rebalance decisions,
+  Trading 212 mirror log, and a read-only "Compare with the Practice account" button.
+* **Lab reports**: the HTML reports written by `silo lab`.
+* **Settings**: add or remove a Trading 212 **Practice** API key. Silo checks the key with
+  `demo.trading212.com` first and only saves keys that server accepts, so a real-money key is never
+  stored. Keys go to `~/.config/silo/credentials.json` (owner-only, outside the repo); environment
+  variables still take precedence.
+
+The server listens on 127.0.0.1 only (other addresses are refused), answers only `localhost` Host
+headers, needs a per-run token on every form, and never changes books or places orders.
+
 ## Quick start
 
 ```bash
@@ -89,7 +105,10 @@ silo paper new uk-trend --symbols-file uk.json --strategy uk_trend
 silo paper run uk-trend --fetch             # once a day after 16:35 London time
 silo paper status uk-trend
 
+silo web                                    # dashboard on http://127.0.0.1:8212/
+
 # Optional: mirror the paper book to a Trading 212 Practice account (paper money)
+# add the Practice key on the dashboard's Settings page, or:
 export T212_DEMO_API_KEY=... T212_DEMO_API_SECRET=...   # key created in Practice mode
 silo paper t212-map uk-trend                # propose Yahoo -> Trading 212 tickers; review the file
 silo paper run uk-trend --fetch --mirror t212

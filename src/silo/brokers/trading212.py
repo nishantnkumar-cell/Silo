@@ -7,7 +7,9 @@ allowlist on every request, and refuses to start if the live host appears
 anywhere in its configuration.
 
 Credentials: create an API key while the Trading 212 app is switched to
-**Practice**, then set ``T212_DEMO_API_KEY`` and ``T212_DEMO_API_SECRET``.
+**Practice**, then add it on the ``silo web`` settings page (stored in
+``~/.config/silo/credentials.json``, owner-only) or set
+``T212_DEMO_API_KEY`` and ``T212_DEMO_API_SECRET``.
 Never put a real-money key here.
 
 Docs: https://docs.trading212.com/api
@@ -72,7 +74,14 @@ class Trading212Demo:
         key = api_key or os.environ.get("T212_DEMO_API_KEY")
         secret = api_secret or os.environ.get("T212_DEMO_API_SECRET")
         if not key or not secret:
-            raise Trading212Error("set T212_DEMO_API_KEY and T212_DEMO_API_SECRET (Practice account key)")
+            from silo.credentials import load_t212
+
+            key, secret = load_t212() or (None, None)
+        if not key or not secret:
+            raise Trading212Error(
+                "no Practice API key: add one on the `silo web` settings page, "
+                "or set T212_DEMO_API_KEY and T212_DEMO_API_SECRET"
+            )
         self._auth = "Basic " + base64.b64encode(f"{key}:{secret}".encode()).decode()
         self._transport = transport or _urllib_transport
         self._sleep, self._clock = sleep, clock

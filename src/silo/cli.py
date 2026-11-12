@@ -221,6 +221,13 @@ def cmd_paper(args) -> int:
     return 0
 
 
+def cmd_web(args) -> int:
+    from silo.web import serve
+
+    serve(args.paper_dir, args.reports_dir, args.host, args.port, open_browser=not args.no_browser)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="silo", description=DISCLAIMER)
     p.add_argument("--data-dir", default="data")
@@ -273,6 +280,14 @@ def main(argv: list[str] | None = None) -> int:
     pp.add_argument("--source", choices=sorted(SOURCES), default="yfinance")
     _add_rule_flags(pp)
     pp.set_defaults(func=cmd_paper)
+
+    w = sub.add_parser("web", help="local dashboard: paper books, lab reports, Trading 212 Practice key")
+    w.add_argument("--port", type=int, default=8212)
+    w.add_argument("--host", default="127.0.0.1", help="loopback only; anything else is refused")
+    w.add_argument("--paper-dir", default="paper")
+    w.add_argument("--reports-dir", default="reports")
+    w.add_argument("--no-browser", action="store_true", help="do not open a browser tab")
+    w.set_defaults(func=cmd_web)
 
     d = sub.add_parser("demo", help="run every strategy on synthetic data, offline")
     d.set_defaults(func=cmd_demo)
