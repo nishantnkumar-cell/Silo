@@ -11,6 +11,8 @@ from silo.strategies.classic import (
     VolTarget,
 )
 from silo.strategies.core_zones import CoreManaged, CoreZones, CoreZonesTrail
+from silo.strategies.crossasset import MacroTilt, SectorMomentum
+from silo.strategies.news import DirectorBuys, NewsMomentum, ResultsDrift
 from silo.strategies.random_entry import RandomEntry
 
 REGISTRY = {
@@ -21,6 +23,11 @@ REGISTRY = {
     "bollinger": BollingerFade,
     "momentum": Momentum12_1,
     "uk_trend": TrendQuality,
+    "sector_mom": SectorMomentum,
+    "macro_tilt": MacroTilt,
+    "news_mom": NewsMomentum,
+    "results_drift": ResultsDrift,
+    "director_buys": DirectorBuys,
     "tsmom": TrendVolTarget,
     "core_zones": CoreZones,
     "core_trail": CoreZonesTrail,
@@ -30,10 +37,17 @@ REGISTRY = {
 
 from silo.agents.blend import Blend, SiloAgent  # noqa: E402 - these build members from REGISTRY
 from silo.agents.contestants import DebateDesk, StylePanel  # noqa: E402
+from silo.agents.informed import FullDesk, FullPanel, InformedDesk, InformedPanel, NewsDesk, NewsPanel  # noqa: E402
 from silo.agents.rulebook import CoreDesk  # noqa: E402
 
 REGISTRY.update({"desk": DebateDesk, "panel": StylePanel, "blend": Blend, "silo_agent": SiloAgent,
+                 "panel_macro": InformedPanel, "desk_macro": InformedDesk, "panel_news": NewsPanel,
+                 "desk_news": NewsDesk, "panel_full": FullPanel, "desk_full": FullDesk,
                  "core_desk": CoreDesk})
+
+from silo.learning.lessons import Learned  # noqa: E402 - wraps any agent above with gated lessons
+
+REGISTRY["learned"] = Learned
 
 __all__ = [
     "REGISTRY",

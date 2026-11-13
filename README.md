@@ -201,7 +201,7 @@ How the AI is kept honest:
 ollama pull qwen2.5:7b
 $env:SILO_LLM = "ollama:qwen2.5:7b"
 
-silo fetch --universe uk
+silo fetch --universe uk --macro
 silo universe uk --save uk.json
 silo league new --with-ai                 # one paper book per contestant, same start, same cash
 silo daily                                # fetch, advance every book, print the leaderboard
@@ -230,14 +230,82 @@ day by day, instead of today's screened list (which would leak today's knowledge
 Model answers are cached in the output folder, so `silo_agent` reuses the desk's and panel's answers
 and an interrupted run resumes where it stopped.
 
-Without `--with-ai` the league has only the rule-based books (`uk_trend`, `momentum`, `blend` and a
-random control), which need no model. Before mirroring, run `silo paper t212-map league-silo_agent`
+Without `--with-ai` the league has only the rule-based books (`uk_trend`, `momentum`, `blend`,
+`sector_mom`, `macro_tilt`, `news_mom`, `results_drift`, `director_buys` and a random control), which need no model. Before mirroring, run `silo paper t212-map league-silo_agent`
 and check the ticker file.
+
+## Cross-market agent
+
+Research behind it: [docs/news-and-cross-asset-research.md](docs/news-and-cross-asset-research.md).
+In short, sector momentum is well evidenced; the pound, oil, metals, gilt yields and US shares mostly
+explain risk and regime rather than forecast single stocks. So the agent adds numbers, not opinions:
+
+* **Data**: `silo fetch --macro` stores pound/dollar, Brent, gold, silver, copper, the S&P 500 and VIX
+  (Yahoo) and the 10-year gilt yield (Bank of England) as context tables (`ctx:macro:*`) with
+  `available_at`. Yahoo series are stamped 23:00 UTC, so a decision at the London close only sees
+  them up to the day before. Gilt yields count from noon the next working day. `silo daily`
+  refreshes them too (`--no-macro` to skip).
+* **Brief columns** (`src/silo/agents/crossasset.py`): each stock's 6-month return against its own
+  sector, its sector against the market, and the 3-month move its macro sensitivities imply. Each
+  sensitivity comes from a weekly regression on the UK market, pound, oil, copper and gilt yield.
+  The market line gives each driver's 3-month move as a percentile of its own history, never a
+  level, and counts the risk-on signals. Sector names never reach the model.
+* **Contestants** (`src/silo/agents/informed.py`): `panel_macro` is the panel plus a cross-market
+  voice. `desk_macro` is the desk with a cross-market analyst briefing both researchers, and its
+  risk manager sees the picks' combined sensitivity to each market. The original `panel` and `desk`
+  are unchanged, so their caches stay valid and the lab can compare them like for like.
+* **Rule baselines** (`src/silo/strategies/crossasset.py`): `sector_mom` (best names in the best
+  sectors) and `macro_tilt` (momentum, invested only as far as the risk-on signals allow). If these
+  can't beat the random control, the same numbers are unlikely to help the AI.
+
+Sector labels (`src/silo/universe/sectors.py`) are today's, applied to the past: a mild look-ahead,
+flagged rather than hidden.
+
+## News agent
+
+Company announcements (RNS) become numbers in the brief. The model never sees announcement text,
+headlines or dates.
+
+* **Data**: `silo news fetch` reads each company's announcement list from Investegate, for personal
+  research use only. It sends one request every 3 seconds, stops at announcements it already has,
+  and stores each company as its own snapshot, so you can stop it and rerun it. The first backfill
+  since 2012 for the whole UK list takes many hours, so run it overnight. Text is fetched only for
+  results, trading updates, profit warnings and director dealings. It is kept locally in
+  `data/news_bodies/` and written once. Publication times are converted from London time to UTC as
+  `available_at`, so a 07:00 RNS counts at that day's close and a 16:40 one the next day.
+  `silo daily --news` picks up new announcements (a few minutes). After a rule fix,
+  `silo news rescore` re-reads stored announcements (adding a new snapshot, never overwriting).
+* **Plain rules first** (`src/silo/data/news.py`):
+  * the headline gives the category (results, trading update, profit warning, director dealing,
+    buyback, M&A, capital raise, board, routine);
+  * the "ahead of / in line with / below expectations" wording gives a surprise sign;
+  * director dealings are read as buys or sells, ignoring awards, options and share plans.
+* **Brief columns** (`src/silo/agents/news.py`):
+  * trading days since results;
+  * the results-day move against the market (3 days);
+  * the last expectations sign;
+  * any profit warning in the last 90 days;
+  * director buys in the last 90 days;
+  * the 6-month return split into news days and quiet days.
+
+  With no announcements stored, heavy-volume days stand in for news days.
+* **Optional model reading** (`src/silo/agents/news_extract.py`): `silo news extract` has the local
+  model read results text that the rules couldn't place. The text is masked first: company, ticker,
+  years, months, dates and amounts are replaced. Answers are stored as numbers in `ctx:news_llm`.
+  `silo news probe` asks the model to guess the company and year from masked text; a high hit rate
+  means the masking leaks.
+* **Contestants**: `panel_news` / `desk_news` (news only) and `panel_full` / `desk_full` (news and
+  cross-market). With `panel`, `desk` and the `_macro` versions, the lab can compare each addition.
+* **Rule baselines** (`src/silo/strategies/news.py`):
+  * `news_mom`: momentum counted on news days only;
+  * `results_drift`: holds after strong results or an "ahead" update;
+  * `director_buys`: holds names where directors bought, unless they have warned on profits.
+
+Judge any AI result only after the model's training cutoff. For news, also check the probe.
 
 ## Next phases
 
 * Kronos (a price-forecasting model) as a contestant, once it runs on the PN50's CPU.
-* News and filings (RNS) through the firewall, so the desk can get its missing analysts.
 * Strategy evolution: let the model propose new rules; the lab disposes.
 
 ## Core Strategy rules (supply and demand)
@@ -261,3 +329,30 @@ silo zones --out reports/zones.html
 
 `silo zones` shows today's demand and supply zones for every stock, with a verdict (in buy zone,
 wait for pull-back, supply too close, no trade), as `reports/zones.html` on the dashboard.
+
+## Learning from past trades
+
+Silo's agents can learn from their own trades, but nothing they learn goes live until it has
+held up on data it wasn't drawn from. Details in [`docs/learning-loop.md`](docs/learning-loop.md).
+
+1. **Journal.** Every position from open to close: the numbers the agent saw when it bought, its
+   reasons (for AI desks: which names the bull backed and the bear warned about, the trader's
+   "why"), and the result after costs and dividends next to the market over the same weeks.
+2. **Review.** A statistical miner looks for entry conditions that kept losing to the market; with
+   `--ai` a model reads an anonymised summary (no names, no dates) and proposes at most three
+   lessons in a fixed rule format such as "don't buy when the 12-month return is above 60%".
+3. **Gate.** A lesson is accepted only if, on a later window and never the locked holdout, the
+   agent with it beats the same agent without it, beats 95% of random filters that skip as many
+   trades, and passes a deflated Sharpe test that counts every retry. Every proposal and verdict is
+   appended to `learning/ledger.jsonl`.
+4. **Use.** The `learned` agent wraps any contestant with its accepted lessons: they stop new
+   entries (never force a sale, so no extra churn), and AI agents also get them in their prompts.
+
+```bash
+silo learn review --all-candidates --strategy core_zones --end 2019-12-31   # journal + proposals
+silo learn gate --all-candidates --strategy core_zones <lesson ids>        # test on 2020 onwards
+silo learn walkforward --all-candidates --strategy core_zones              # does learning help at all?
+silo learn list
+silo paper new learned-core --strategy learned --symbols-file uk.json \
+    --params "$(silo learn params --strategy core_zones)"
+```

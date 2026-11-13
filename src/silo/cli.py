@@ -21,6 +21,7 @@ from silo.strategies import REGISTRY
 
 DISCLAIMER = "Research only. Simulated results, not financial advice. Silo never trades real money."
 STUDY_STRATEGIES = [n for n in REGISTRY if n not in ("buy_and_hold", "random")]
+WRAPPERS = ("learned",)  # needs a base agent and lessons; left out of "all" runs
 AI_STRATEGIES = [n for n in REGISTRY if REGISTRY[n].uses_llm]
 
 
@@ -29,8 +30,8 @@ def _everything() -> list[str]:
     import os
 
     if os.environ.get("SILO_LLM"):
-        return list(REGISTRY)
-    return [n for n in REGISTRY if n not in AI_STRATEGIES]
+        return [n for n in REGISTRY if n not in WRAPPERS]
+    return [n for n in REGISTRY if n not in AI_STRATEGIES and n not in WRAPPERS]
 
 
 def _print_table(rows: dict[str, dict[str, float]]) -> None:
@@ -106,6 +107,10 @@ def cmd_fetch(args) -> int:
 
         symbols = symbols + DAILY_UNIVERSES[args.universe]
     failed = []
+    if args.macro:
+        from silo.data.macro import fetch_all
+
+        failed += [f"macro:{n}" for n in fetch_all(vault)]
     for symbol in symbols:
         try:
             stored = vault.put_bars(symbol, SOURCES[args.source](symbol))
@@ -119,8 +124,11 @@ def cmd_fetch(args) -> int:
 
 
 def _demo_tables(n=4, n_days=2000):
+    from silo.data.macro import synthetic_macro
+
     symbols = [f"SYN{i}" for i in range(n)]
-    return symbols, {s: normalize_bars(synthetic_bars(n_days=n_days, seed=i)) for i, s in enumerate(symbols)}
+    tables = {s: normalize_bars(synthetic_bars(n_days=n_days, seed=i)) for i, s in enumerate(symbols)}
+    return symbols, tables | synthetic_macro(tables[symbols[0]].index)
 
 
 def _run_all(tables, symbols, names, start=None, end=None, **rules) -> dict[str, dict[str, float]]:
@@ -129,7 +137,7 @@ def _run_all(tables, symbols, names, start=None, end=None, **rules) -> dict[str,
 
 def cmd_backtest(args) -> int:
     vault = DataVault(args.data_dir)
-    tables = {s: vault.get_bars(s) for s in args.symbols}
+    tables = vault.tables(args.symbols)
     names = _everything() if args.strategy == "all" else ["buy_and_hold", args.strategy]
     _print_table(_run_all(tables, args.symbols, names, args.start, args.end, **_rules(args, args.symbols)))
     return 0
@@ -139,7 +147,7 @@ def cmd_demo(args) -> int:
     symbols, tables = _demo_tables()
     print("Synthetic random-walk data: there is no real signal here, so no strategy")
     print("should reliably beat buy-and-hold. If one does, suspect luck.\n")
-    names = [n for n in REGISTRY if n not in AI_STRATEGIES]
+    names = [n for n in REGISTRY if n not in AI_STRATEGIES and n not in WRAPPERS]
     _print_table(_run_all(tables, symbols, names, costs=CostModel(), constraints=Constraints()))
     print("\nAI strategies (desk, panel, silo_agent) need a model: set SILO_LLM=ollama:<model> or rulebot.")
     return 0
@@ -168,9 +176,10 @@ def cmd_lab(args) -> int:
         if not symbols:
             print("give symbols, --symbols-file, --all-candidates, or use --demo")
             return 2
-        tables = {s: vault.get_bars(s) for s in symbols}
-        symbols = [s for s in symbols if len(tables[s]) > 260]
-        tables = {s: tables[s] for s in symbols}
+        tables = vault.tables(symbols)  # bars plus cached context tables (macro, news)
+        short = {s for s in symbols if len(tables[s]) <= 260}
+        symbols = [s for s in symbols if s not in short]
+        tables = {k: v for k, v in tables.items() if k not in short}
     if args.strategy != "all":
         names = [args.strategy]
     elif args.style == "daily":
@@ -337,7 +346,7 @@ def _league_backtest(args, vault) -> int:
         symbols = [s for s in UK_CANDIDATES if vault.snapshots(s)]
     else:
         symbols = json.loads(Path(args.symbols_file).read_text())
-    tables = {s: vault.get_bars(s) for s in symbols}
+    tables = vault.tables(symbols)
     symbols = [s for s in symbols if len(tables[s]) > 260]
     names = args.only or (RULE_CONTESTANTS + (AI_CONTESTANTS if args.with_ai else []))
     if any(REGISTRY[n].uses_llm for n in names):
@@ -395,6 +404,17 @@ def cmd_daily(args) -> int:
     vault = DataVault(args.data_dir)
     if not args.no_fetch:
         failed = fetch_for_books(vault, args.paper_dir, SOURCES[args.source])
+        if args.news:
+            from silo.data.news import fetch_news
+            from silo.league import book_names
+            from silo.paper import PaperBook
+
+            symbols = sorted({s for n in book_names(args.paper_dir) for s in PaperBook(n, args.paper_dir).config()["symbols"]})
+            failed += [f"news:{s}" for s in fetch_news(vault, symbols, delay=args.news_delay, log=lambda m: None)]
+        if not args.no_macro:
+            from silo.data.macro import fetch_all
+
+            failed += [f"macro:{n}" for n in fetch_all(vault, log=lambda m: None)]
         if failed:
             print(f"{len(failed)} symbol(s) not refreshed: {' '.join(failed)}")
     board = run_all(vault, args.paper_dir)
@@ -437,10 +457,216 @@ def cmd_daily(args) -> int:
     return code
 
 
+def _news_symbols(args) -> list[str]:
+    if args.symbols:
+        return args.symbols
+    path = Path(args.symbols_file)
+    if path.exists():
+        return json.loads(path.read_text())
+    from silo.universe import UK_CANDIDATES
+
+    return UK_CANDIDATES
+
+
+def cmd_news(args) -> int:
+    """Company announcements (RNS) for the news agent. Personal use; fetched slowly, stored locally."""
+    from silo.data import news
+
+    vault = DataVault(args.data_dir)
+    if args.action == "fetch":
+        symbols = _news_symbols(args)
+        print(f"fetching announcements for {len(symbols)} companies, one request every {args.delay:g}s; "
+              "safe to stop and rerun, it resumes where it left off")
+        failed = news.fetch_news(vault, symbols, since=args.since, delay=args.delay)
+        if failed:
+            print(f"failed: {' '.join(failed)}")
+        return 0
+    try:
+        table = vault.get_context(news.TABLE)
+    except KeyError:
+        print("no announcements stored yet; run `silo news fetch` first")
+        return 1
+    if args.action == "rescore":
+        news.rescore(vault, news.Fetcher(args.delay))
+        return 0
+    if args.action == "show":
+        rows = table[table["symbol"].isin(_news_symbols(args))] if args.symbols else table
+        cols = [c for c in ["symbol", "available_at", "category", "expect", "dealing", "headline"] if c in rows]
+        with pd.option_context("display.max_rows", None, "display.width", 200, "display.max_colwidth", 70):
+            print(rows[cols].tail(args.limit or 40).to_string())
+        print("\n" + rows["category"].value_counts().to_string())
+        return 0
+    from silo.agents.llm import client_from_spec
+    from silo.agents.news_extract import probe, run_extraction
+
+    client = client_from_spec(log_dir=Path(args.data_dir) / "news_llm_log")
+    if args.action == "extract":
+        run_extraction(vault, client, limit=args.limit)
+    else:
+        res = probe(vault, client, n=args.limit or 50)
+        print(f"asked {res['asked']}: model named the company {res['company_hit_rate'] or 0:.0%} of the time "
+              f"and the year {res['year_hit_rate'] or 0:.0%}. Well above zero means masking leaks; treat its "
+              f"answers before its training cutoff ({client.cutoff}) with suspicion.")
+    return 0
+
+
 def cmd_web(args) -> int:
     from silo.web import serve
 
     serve(args.paper_dir, args.reports_dir, args.host, args.port, open_browser=not args.no_browser)
+    return 0
+
+
+def _learn_data(args):
+    """Symbols and tables for `silo learn`, plus the first day of the locked holdout."""
+    if args.demo:
+        from silo.markets import UK
+
+        symbols = [f"SYN{i}.L" for i in range(10)]
+        tables = {s: normalize_bars(synthetic_bars(n_days=2000, seed=i, start_price=2500), UK, pence=True)
+                  for i, s in enumerate(symbols)}
+    else:
+        vault = DataVault(args.data_dir)
+        if args.all_candidates:
+            from silo.universe import UK_CANDIDATES
+
+            symbols = [s for s in UK_CANDIDATES if vault.snapshots(s)]
+        elif args.symbols:
+            symbols = args.symbols
+        else:
+            symbols = json.loads(Path(args.symbols_file).read_text())
+        tables = vault.tables(symbols)  # bars plus cached context tables (macro, news)
+        short = {s for s in symbols if len(tables[s]) <= 260}
+        symbols = [s for s in symbols if s not in short]
+        tables = {k: v for k, v in tables.items() if k not in short}
+    dates = sorted(set().union(*(tables[s].index for s in symbols)))
+    holdout_start = dates[int(len(dates) * (1 - args.holdout))]
+    return symbols, tables, dates, holdout_start
+
+
+def _before(dates, day):
+    earlier = [d for d in dates if d < day]
+    return earlier[-1]
+
+
+def cmd_learn(args) -> int:
+    """Learn from past trades: journal, review, gate, walk-forward. Never touches the holdout."""
+    import os
+
+    from silo.learning import (
+        Ledger,
+        ai_review,
+        build_journal,
+        learning_walk_forward,
+        mine,
+        run_gate,
+    )
+    from silo.learning.journal import summary, write_journal
+
+    out = Path(args.out)
+    ledger = Ledger(out / "ledger.jsonl")
+    if args.action != "list":
+        args.strategy = args.strategy or "uk_trend"
+    if args.action == "list":
+        recs = ledger.lessons(args.strategy)
+        if not recs:
+            print(f"no lessons in {ledger.path} yet; start with `silo learn review`")
+        for i, r in recs.items():
+            from silo.learning import Lesson
+
+            last = r["gates"][-1] if r["gates"] else None
+            when = f", last gate {last['test_start']} to {last['test_end']}" if last else ""
+            print(f"{i}  {r['status']:9s} {r['base']:12s} {Lesson.from_dict(r['lesson']).describe()}"
+                  f"  (from trades to {r['learn_end'][:10]}, {r['source']}{when})")
+        return 0
+    if args.action == "params":
+        lessons = [x.to_dict() for x in ledger.accepted(args.strategy)]
+        print(json.dumps({"base": args.strategy, "base_params": json.loads(args.params), "lessons": lessons}))
+        if not lessons:
+            print(f"(no accepted lessons for {args.strategy}: the learned agent would trade exactly like it)",
+                  file=sys.stderr)
+        return 0
+
+    symbols, tables, dates, holdout_start = _learn_data(args)
+    research_end = _before(dates, holdout_start)
+    rules = _rules(args, symbols)
+    params = json.loads(args.params)
+    if REGISTRY[args.strategy].uses_llm and not os.environ.get("SILO_LLM"):
+        print("AI agents need SILO_LLM (e.g. ollama:qwen2.5:7b)")
+        return 2
+    os.environ.setdefault("SILO_LLM_LOG", str(out / "llm"))
+    client = None
+    if getattr(args, "ai", False):
+        from silo.agents.llm import client_from_spec
+
+        client = client_from_spec(log_dir=out / "llm")
+    print(f"{args.strategy} on {len(symbols)} symbols; locked holdout from {holdout_start.date()} is never used")
+
+    if args.action == "review":
+        start = pd.Timestamp(args.start) if args.start else dates[0]
+        end = pd.Timestamp(args.end) if args.end else dates[int(len(dates) * 0.6)]
+        if end >= holdout_start:
+            print(f"--end must be before the holdout ({holdout_start.date()})")
+            return 2
+        res = run_backtest(REGISTRY[args.strategy](symbols, **params), tables, start=start, end=end, **rules)
+        trades = build_journal(res, tables, symbols, core=args.strategy.startswith("core"))
+        csv, _ = write_journal(trades, out / f"journal-{args.strategy}")
+        s = summary(trades)
+        print(f"journal: {csv} ({s.get('closed', 0)} closed trades, beat the market "
+              f"{s.get('win_rate_vs_market', 0):.0%} of the time, {s.get('avg_excess', 0):+.1%} a trade on average)")
+        cands, tried = mine(trades)
+        lessons = ai_review(trades, client, cands) if client else [c.lesson for c in cands]
+        evidence = {c.lesson.id: c.to_dict() for c in cands}
+        ids = ledger.propose(lessons, args.strategy, start.date(), end.date(), "ai" if client else "statistics",
+                             evidence)
+        print(f"tried {tried} splits; proposed {len(ids)} lesson(s):")
+        for x in lessons:
+            print(f"  {x.id}  {x.describe()}")
+        if ids:
+            print(f"\nnext: silo learn gate --strategy {args.strategy} {' '.join(ids)}"
+                  f"   (tests on data after {end.date()}, before the holdout)")
+        return 0
+
+    if args.action == "gate":
+        recs = ledger.lessons(args.strategy)
+        missing = [i for i in args.ids if i not in recs]
+        if missing or not args.ids:
+            print(f"unknown lesson id(s) for {args.strategy}: {' '.join(missing) or '(none given)'}; see `silo learn list`")
+            return 2
+        from silo.learning import Lesson
+
+        lessons = [Lesson.from_dict(recs[i]["lesson"]) for i in args.ids]
+        learned_until = max(pd.Timestamp(recs[i]["learn_end"]) for i in args.ids)
+        t0 = pd.Timestamp(args.test_start) if args.test_start else next(d for d in dates if d > learned_until)
+        t1 = pd.Timestamp(args.test_end) if args.test_end else research_end
+        g = run_gate(args.strategy, lessons, symbols, tables, learned_until=learned_until, test_start=t0,
+                     test_end=t1, holdout_start=holdout_start, base_params=params, n_random=args.random,
+                     ledger=ledger, **rules)
+        print(f"test window {t0.date()} to {t1.date()} (lessons drawn from trades up to {learned_until.date()})")
+        for c in g.checks:
+            mark = {True: "pass", False: "FAIL", None: "info"}[c.passed]
+            print(f"  {mark:4s}  {c.name}: {c.detail}")
+        print(f"\n{'ACCEPTED' if g.passed else 'REJECTED'}: return {g.variant_return:.1%} with the lesson(s), "
+              f"{g.base_return:.1%} without, buy-and-hold {g.bench_return:.1%}. Recorded in {ledger.path}")
+        if g.passed:
+            print(f"use it: silo paper new <book> --strategy learned --params "
+                  f"\"$(silo learn params --strategy {args.strategy})\"")
+        print(f"\n{DISCLAIMER}")
+        return 0
+
+    # walkforward
+    print(f"learning walk-forward, {args.folds} folds, reviewer: {'AI + statistics' if client else 'statistics'}")
+    wf = learning_walk_forward(args.strategy, symbols, tables, end=holdout_start, n_folds=args.folds,
+                               base_params=params, client=client, progress=print, **rules)
+    m = wf.metrics()
+    out.mkdir(parents=True, exist_ok=True)
+    path = out / f"walkforward-{args.strategy}.json"
+    path.write_text(json.dumps({**wf.to_dict(), "disclaimer": DISCLAIMER}, indent=2, default=str))
+    print(f"\nout of sample: learning {m['learned_return']:.1%} (Sharpe {m['learned_sharpe']:.2f}), "
+          f"never learning {m['base_return']:.1%} ({m['base_sharpe']:.2f}), "
+          f"buy-and-hold {m['bench_return']:.1%} ({m['bench_sharpe']:.2f})")
+    print(f"learning helped in {m['folds_improved']} of {m['folds']} folds; deflated Sharpe of the "
+          f"difference {m['deflated']:.2f} (0.95 or more would be convincing)\nsaved {path}\n\n{DISCLAIMER}")
     return 0
 
 
@@ -454,6 +680,8 @@ def main(argv: list[str] | None = None) -> int:
     f.add_argument("--universe", choices=["uk", "silver", "crypto"],
                    help="also fetch a candidate list: UK shares, silver ETFs (SLV SIVR) or crypto (BTC ETH)")
     f.add_argument("--source", choices=sorted(SOURCES), default="yfinance")
+    f.add_argument("--macro", action="store_true",
+                   help="also fetch cross-market series: pound, oil, metals, gilt yield, US shares, VIX")
     f.set_defaults(func=cmd_fetch)
 
     b = sub.add_parser("backtest", help="backtest strategies against buy-and-hold")
@@ -517,7 +745,8 @@ def main(argv: list[str] | None = None) -> int:
     lg.add_argument("--symbols-file", default="uk.json", help="JSON list, e.g. from `silo universe uk --save`")
     lg.add_argument("--universe", choices=["silver", "crypto"], help="use a daily-trading universe as the symbols")
     lg.add_argument("--prefix", default="league")
-    lg.add_argument("--with-ai", action="store_true", help="add desk, panel and silo_agent (needs SILO_LLM)")
+    lg.add_argument("--with-ai", action="store_true",
+                    help="add the AI contestants: desk, panel, silo_agent and their cross-market versions (needs SILO_LLM)")
     lg.add_argument("--cash", type=float, default=100_000.0)
     lg.add_argument("--paper-dir", default="paper")
     lg.add_argument("--start", help="backtest: first date, e.g. 2012-01-01")
@@ -538,9 +767,24 @@ def main(argv: list[str] | None = None) -> int:
     dy.add_argument("--paper-dir", default="paper")
     dy.add_argument("--source", choices=sorted(SOURCES), default="yfinance")
     dy.add_argument("--no-fetch", action="store_true")
+    dy.add_argument("--no-macro", action="store_true", help="skip refreshing the cross-market series")
+    dy.add_argument("--news", action="store_true", help="also fetch new company announcements (a few minutes)")
+    dy.add_argument("--news-delay", type=float, default=3.0)
     dy.add_argument("--mirror", metavar="BOOK", help="mirror this book's newest rebalance to Trading 212 Practice")
     dy.add_argument("--fractional", action="store_true")
     dy.set_defaults(func=cmd_daily)
+
+    nw = sub.add_parser("news", help="UK company announcements (RNS) for the news agent")
+    nw.add_argument("action", choices=["fetch", "show", "rescore", "extract", "probe"],
+                    help="fetch: download new announcements (slow, polite, resumable); show: list stored ones; "
+                         "rescore: re-run the rules on stored ones after a rule fix; "
+                         "extract: a local model reads results text the rules couldn't; probe: test the masking")
+    nw.add_argument("--symbols", nargs="*")
+    nw.add_argument("--symbols-file", default="uk.json")
+    nw.add_argument("--since", default="2012-01-01", help="oldest announcement to fetch")
+    nw.add_argument("--delay", type=float, default=3.0, help="seconds between requests")
+    nw.add_argument("--limit", type=int, help="rows to show, or announcements to read with the model")
+    nw.set_defaults(func=cmd_news)
 
     w = sub.add_parser("web", help="local dashboard: paper books, lab reports, Trading 212 Practice key")
     w.add_argument("--port", type=int, default=8212)
@@ -549,6 +793,30 @@ def main(argv: list[str] | None = None) -> int:
     w.add_argument("--reports-dir", default="reports")
     w.add_argument("--no-browser", action="store_true", help="do not open a browser tab")
     w.set_defaults(func=cmd_web)
+
+    ln = sub.add_parser("learn", help="learn from past trades: journal, lessons, and a gate before anything goes live")
+    ln.add_argument("action", choices=["review", "gate", "walkforward", "list", "params"],
+                    help="review: journal + proposed lessons; gate: test lessons on later data; "
+                         "walkforward: test learn-then-trade itself; list: the ledger; params: for `silo paper new`")
+    ln.add_argument("ids", nargs="*", help="gate: lesson ids from `silo learn review`")
+    ln.add_argument("--strategy", choices=[n for n in REGISTRY if n not in ("learned", "buy_and_hold")],
+                    help="the agent that learns (default uk_trend)")
+    ln.add_argument("--params", default="{}", help="the agent's parameters as JSON")
+    ln.add_argument("--symbols", nargs="*")
+    ln.add_argument("--symbols-file", default="uk.json")
+    ln.add_argument("--all-candidates", action="store_true")
+    ln.add_argument("--demo", action="store_true", help="synthetic data, offline")
+    ln.add_argument("--start", help="review: first day of trades to learn from")
+    ln.add_argument("--end", help="review: last day of trades to learn from (default: 60%% of the data)")
+    ln.add_argument("--test-start", help="gate: default the day after the lessons' last trade")
+    ln.add_argument("--test-end", help="gate: default the day before the locked holdout")
+    ln.add_argument("--holdout", type=float, default=0.2, help="fraction locked as holdout (same as `silo lab`)")
+    ln.add_argument("--random", type=int, default=20, help="gate: random-filter control runs")
+    ln.add_argument("--folds", type=int, default=4)
+    ln.add_argument("--ai", action="store_true", help="add the AI reviewer (needs SILO_LLM)")
+    ln.add_argument("--out", default="learning", help="folder for the ledger, journals and reports")
+    _add_rule_flags(ln)
+    ln.set_defaults(func=cmd_learn)
 
     d = sub.add_parser("demo", help="run every strategy on synthetic data, offline")
     d.set_defaults(func=cmd_demo)
