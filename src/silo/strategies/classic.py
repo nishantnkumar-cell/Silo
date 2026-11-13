@@ -44,13 +44,27 @@ class _PerSymbolSwitch(Strategy):
 
 
 class BuyAndHold(Strategy):
+    """Buy every symbol in equal weights once, then hold.
+
+    It waits until every symbol has ``warmup`` bars of history, so the one
+    purchase is not refused by the liquidity rules (which need 60 days of
+    volume) and every symbol has started trading. A run that starts with that
+    history already in place buys on its first day, as before.
+    """
+
     name = "buy_and_hold"
+
+    def __init__(self, symbols, warmup: int = 60):
+        super().__init__(symbols)
+        self.warmup = warmup
 
     def reset(self) -> None:
         self.done = False
 
     def decide(self, view):
         if self.done:
+            return None
+        if any(len(view.bars(s, lookback=self.warmup)) < self.warmup for s in self.symbols):
             return None
         self.done = True
         return _equal(self.symbols, len(self.symbols))

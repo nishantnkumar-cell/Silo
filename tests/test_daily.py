@@ -149,3 +149,15 @@ def test_locked_positions_that_drifted_never_lever_the_book():
     out = apply_constraints({"A": 0.5, "B": 0.5}, current, {"A": 0, "B": 0}, Constraints.daily_trading())
     assert sum(out.values()) <= 1.0 + 1e-12
     assert out["A"] >= 0.5 and out["B"] >= 0.48 - 1e-12
+
+
+def test_buy_and_hold_invests_when_the_run_starts_on_the_first_bar():
+    """Liquidity needs 60 days of volume, so a first-day buy used to be refused forever."""
+    tables = crypto_tables(400)
+    late = tables["ETH-USD"].iloc[100:]  # one coin starts trading later, like ETH after BTC
+    tables["ETH-USD"] = late
+    res = run_backtest(REGISTRY["buy_and_hold"](CRYPTO_PAIRS), tables, costs=CostModel.crypto(),
+                       constraints=Constraints.daily_trading(liquidity=Liquidity.for_market("CRYPTO")))
+    assert set(res.fills["symbol"]) == {"BTC-USD", "ETH-USD"}
+    assert res.fills["date"].min() >= late.index[59]
+    assert res.equity.iloc[-1] != res.equity.iloc[0]
