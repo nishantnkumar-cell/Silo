@@ -88,8 +88,13 @@ class PaperBook:
         }
         self.dir.mkdir(parents=True, exist_ok=True)
         (self.dir / "config.json").write_text(json.dumps(cfg, indent=2))
+        strat = REGISTRY[strategy](symbols, **(params or {}))
+        model = _attach_model(strat, self.dir / "llm")
+        if model:
+            cfg["model"] = model
+            (self.dir / "config.json").write_text(json.dumps(cfg, indent=2))
         state = {
-            "book": Session.start(REGISTRY[strategy](symbols, **(params or {})), cash, costs, constraints),
+            "book": Session.start(strat, cash, costs, constraints),
             "benchmark": Session.start(BuyAndHold(symbols), cash, costs, Constraints()),
         }
         self._save(state)
@@ -161,6 +166,25 @@ class PaperBook:
             },
             "metrics": summarize(eq, book.result().fills) if len(eq) > 1 else {},
         }
+
+
+def _attach_model(strategy, log_dir: Path) -> dict | None:
+    """Give AI strategies (and AI members of a blend) a model now, logging into the book.
+
+    Fixing the model at creation means a book never silently changes model.
+    """
+    from silo.agents.contestants import LLMStrategy
+    from silo.agents.llm import client_from_spec
+
+    agents = [strategy] + list(getattr(strategy, "members", {}).values())
+    agents = [a for a in agents if isinstance(a, LLMStrategy)]
+    if not agents:
+        return None
+    client = client_from_spec(log_dir=log_dir)
+    for a in agents:
+        if a.client is None:
+            a.client = client
+    return {"model": client.model, "cutoff": client.cutoff}
 
 
 class MirrorError(RuntimeError):

@@ -22,6 +22,11 @@ REGISTRY = {
     "random": RandomEntry,
 }
 
+from silo.agents.blend import Blend, SiloAgent  # noqa: E402 - these build members from REGISTRY
+from silo.agents.contestants import DebateDesk, StylePanel  # noqa: E402
+
+REGISTRY.update({"desk": DebateDesk, "panel": StylePanel, "blend": Blend, "silo_agent": SiloAgent})
+
 __all__ = [
     "REGISTRY",
     "Strategy",

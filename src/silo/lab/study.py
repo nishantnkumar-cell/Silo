@@ -116,6 +116,15 @@ def run_study(
         ),
     ]
 
+    if model_cutoff:
+        clean = model_cutoff != "unknown" and oos_start > pd.Timestamp(model_cutoff) + pd.offsets.MonthEnd(0)
+        result.checks.append(Check(
+            "Tested only after the model's training cutoff",
+            bool(clean),
+            f"model cutoff {model_cutoff}; out-of-sample starts {oos_start.date()}"
+            + ("" if clean else ": the model may remember what happened, so treat this as contaminated"),
+        ))
+
     if open_holdout:
         result.holdout = _open_holdout(strategy_cls, symbols, tables, holdout_start, holdout_log, **kwargs)
         h = result.holdout
