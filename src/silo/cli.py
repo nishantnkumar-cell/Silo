@@ -128,12 +128,21 @@ def cmd_lab(args) -> int:
     if args.demo:
         symbols, tables = _demo_tables()
     else:
-        if not args.symbols:
-            print("give symbols, or use --demo")
-            return 2
         vault = DataVault(args.data_dir)
-        symbols = args.symbols
+        if args.all_candidates:
+            from silo.universe import UK_CANDIDATES
+
+            symbols = [s for s in UK_CANDIDATES if vault.snapshots(s)]
+        elif args.symbols_file:
+            symbols = json.loads(Path(args.symbols_file).read_text())
+        else:
+            symbols = args.symbols
+        if not symbols:
+            print("give symbols, --symbols-file, --all-candidates, or use --demo")
+            return 2
         tables = {s: vault.get_bars(s) for s in symbols}
+        symbols = [s for s in symbols if len(tables[s]) > 260]
+        tables = {s: tables[s] for s in symbols}
     names = [n for n in STUDY_STRATEGIES if n in _everything()] if args.strategy == "all" else [args.strategy]
     log = HoldoutLog(Path(args.out) / "holdout_log.jsonl")
     for name in names:
@@ -366,6 +375,9 @@ def main(argv: list[str] | None = None) -> int:
     lab.add_argument("--open-holdout", action="store_true", help="evaluate on the locked holdout (logged)")
     lab.add_argument("--out", default="reports")
     lab.add_argument("--demo", action="store_true", help="use synthetic data, offline")
+    lab.add_argument("--symbols-file", help="JSON list of symbols, e.g. from `silo universe uk --save`")
+    lab.add_argument("--all-candidates", action="store_true",
+                     help="every UK candidate with cached data (liquidity still applied point-in-time)")
     _add_rule_flags(lab)
     lab.set_defaults(func=cmd_lab)
 

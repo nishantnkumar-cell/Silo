@@ -9,6 +9,7 @@ from silo.strategies.classic import (
     TrendQuality,
     VolTarget,
 )
+from silo.strategies.core_zones import CoreZones, CoreZonesTrail
 from silo.strategies.random_entry import RandomEntry
 
 REGISTRY = {
@@ -19,6 +20,8 @@ REGISTRY = {
     "bollinger": BollingerFade,
     "momentum": Momentum12_1,
     "uk_trend": TrendQuality,
+    "core_zones": CoreZones,
+    "core_trail": CoreZonesTrail,
     "random": RandomEntry,
 }
 
@@ -38,5 +41,6 @@ __all__ = [
     "Momentum12_1",
     "VolTarget",
     "TrendQuality",
+    "CoreZones",
     "RandomEntry",
 ]
