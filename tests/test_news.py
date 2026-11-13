@@ -20,7 +20,7 @@ from silo.strategies import REGISTRY
 
 @pytest.mark.parametrize("headline,cat", [
     ("3rd Quarter Results", "results"), ("Tesco PLC Interim Results 2026/27", "results"),
-    ("Half-year Report", "results"), ("Total Voting Rights", "routine"), ("Holding(s) in Company", "routine"),
+    ("Half-year Report", "results"), ("Half-year Financial Report", "results"), ("Total Voting Rights", "routine"), ("Holding(s) in Company", "routine"),
     ("Director/PDMR Shareholding", "director_dealing"), ("Transaction in Own Shares", "buyback"),
     ("Trading Statement", "trading_update"), ("Q1 Trading Update", "trading_update"),
     ("Directorate Change", "board"), ("Annual Financial Report", "routine"),
@@ -48,6 +48,15 @@ def test_expectation_sign(text, sign):
     ("The CFO sold 5,000 shares.", -1),
     ("Award of shares under the LTIP; shares sold to cover tax.", 0),
     ("Shares acquired through the dividend reinvestment plan.", 0),
+    # a real AstraZeneca-style notice: the buy is in the transaction field, "sold" only in the footer
+    ("Details of the person discharging managerial responsibilities Name Pascal Soriot Position CEO "
+     "Nature of the transaction Purchase of Ordinary Shares Price(s) and volume(s) GBP121.02 60,000 "
+     "Date of the transaction 18 September 2026 About AstraZeneca AstraZeneca is a global biopharmaceutical "
+     "company. Its innovative medicines are sold in more than 125 countries and used by millions of patients.", 1),
+    ("The Chair bought 2,500 shares at 121.21p. About AstraZeneca Its medicines are sold in more than 125 "
+     "countries and option programmes are described at www.example.com.", 1),
+    ("Nature of the transaction Vesting of shares under the Performance Share Plan Price(s) and volume(s) nil 1,000 "
+     "About AstraZeneca medicines are sold worldwide.", 0),
 ])
 def test_dealing_direction(text, sign):
     assert news.dealing_direction(text) == sign
@@ -224,3 +233,24 @@ def test_extraction_and_probe_with_offline_bot(tmp_path):
     llm = vault.get_context(LLM_TABLE)
     assert llm.loc["9", "model"] == "rulebot" and llm["available_at"].iloc[0] == rows["available_at"].iloc[0]
     assert probe(vault, bot)["company_hit_rate"] == 0
+
+
+def test_rescore_fixes_stored_rows_without_overwriting(tmp_path):
+    vault = DataVault(tmp_path)
+    rows = pd.DataFrame([{"id": "1", "symbol": "AZN.L", "company": "astrazeneca", "category": "other",
+                          "headline": "Half-year Financial Report", "expect": 0, "dealing": 0, "url": f"{news.BASE}/announcement/rns/x--azn/h/1",
+                          "available_at": pd.Timestamp("2026-07-27 06:00", tz="UTC"), "body": ""},
+                         {"id": "2", "symbol": "AZN.L", "company": "astrazeneca", "category": "director_dealing",
+                          "headline": "Director/PDMR Shareholding", "expect": 0, "dealing": 0, "url": f"{news.BASE}/a/2",
+                          "available_at": pd.Timestamp("2026-09-18 06:00", tz="UTC"),
+                          "body": "Nature of the transaction Purchase of shares Price(s) and volume(s) 1 2 "
+                                  "About AstraZeneca medicines are sold in 125 countries."}])
+    news.save_bodies(vault, rows)
+    vault.put_context(news.TABLE, news.to_table(rows.drop(columns="body")))
+    site = FakeSite({}, {"1": "Results ahead of expectations."})
+    assert news.rescore(vault, news.Fetcher(0, opener=site, sleep=lambda s: None), log=lambda m: None) == 2
+    table = vault.get_context(news.TABLE)
+    assert table.loc["1", "category"] == "results" and table.loc["1", "expect"] == 1
+    assert table.loc["2", "dealing"] == 1
+    assert len(list((tmp_path / "context").rglob("*.parquet"))) == 2
+    assert news.rescore(vault, log=lambda m: None) == 0

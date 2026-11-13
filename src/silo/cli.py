@@ -458,6 +458,9 @@ def cmd_news(args) -> int:
     except KeyError:
         print("no announcements stored yet; run `silo news fetch` first")
         return 1
+    if args.action == "rescore":
+        news.rescore(vault, news.Fetcher(args.delay))
+        return 0
     if args.action == "show":
         rows = table[table["symbol"].isin(_news_symbols(args))] if args.symbols else table
         cols = [c for c in ["symbol", "available_at", "category", "expect", "dealing", "headline"] if c in rows]
@@ -736,8 +739,9 @@ def main(argv: list[str] | None = None) -> int:
     dy.set_defaults(func=cmd_daily)
 
     nw = sub.add_parser("news", help="UK company announcements (RNS) for the news agent")
-    nw.add_argument("action", choices=["fetch", "show", "extract", "probe"],
+    nw.add_argument("action", choices=["fetch", "show", "rescore", "extract", "probe"],
                     help="fetch: download new announcements (slow, polite, resumable); show: list stored ones; "
+                         "rescore: re-run the rules on stored ones after a rule fix; "
                          "extract: a local model reads results text the rules couldn't; probe: test the masking")
     nw.add_argument("--symbols", nargs="*")
     nw.add_argument("--symbols-file", default="uk.json")

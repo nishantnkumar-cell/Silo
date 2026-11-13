@@ -273,7 +273,8 @@ headlines or dates.
   results, trading updates, profit warnings and director dealings. It is kept locally in
   `data/news_bodies/` and written once. Publication times are converted from London time to UTC as
   `available_at`, so a 07:00 RNS counts at that day's close and a 16:40 one the next day.
-  `silo daily --news` picks up new announcements (a few minutes).
+  `silo daily --news` picks up new announcements (a few minutes). After a rule fix,
+  `silo news rescore` re-reads stored announcements (adding a new snapshot, never overwriting).
 * **Plain rules first** (`src/silo/data/news.py`):
   * the headline gives the category (results, trading update, profit warning, director dealing,
     buyback, M&A, capital raise, board, routine);
