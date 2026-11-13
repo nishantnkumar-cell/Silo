@@ -202,6 +202,16 @@ def cmd_paper(args) -> int:
 
         print(reconcile(book, Trading212Demo()).to_string())
         return 0
+    if args.action == "t212-fills":
+        from silo.brokers.trading212 import Trading212Demo
+        from silo.fills import collect_fills, format_gap, gap_report, save_gap
+
+        new = collect_fills(book, Trading212Demo())
+        print(f"{len(new)} new Practice fill(s) logged")
+        gap, summary = gap_report(book)
+        save_gap(book, gap, summary)
+        print(format_gap(gap, summary, book.config()["currency"]))
+        return 0
     if args.action == "new":
         symbols = args.symbols or json.loads(Path(args.symbols_file).read_text())
         rules = _rules(args, symbols)
@@ -220,8 +230,16 @@ def cmd_paper(args) -> int:
         print(f"processed {len(events)} new trading day(s)")
         if args.mirror == "t212":
             from silo.brokers.trading212 import Trading212Demo
+            from silo.fills import collect_fills, gap_report, save_gap
             from silo.paper import mirror_latest_decision
 
+            try:
+                got = collect_fills(book, Trading212Demo())
+                save_gap(book, *gap_report(book))
+                if got:
+                    print(f"Trading 212 Practice: {len(got)} new fill(s) logged; see `silo paper t212-fills {book.name}`")
+            except Exception as exc:  # noqa: BLE001 - fills are a report; never block mirroring
+                print(f"Trading 212 Practice fills not collected: {exc}")
             sent = mirror_latest_decision(book, Trading212Demo(), fractional=args.fractional)
             print(f"Trading 212 Practice: {len(sent)} order(s) sent" if sent else
                   "Trading 212 Practice: no new rebalance to mirror")
@@ -241,10 +259,54 @@ def cmd_paper(args) -> int:
     return 0
 
 
+def _league_backtest(args, vault) -> int:
+    import os
+
+    from silo.lab.league_backtest import run_league_backtest, write
+    from silo.league import AI_CONTESTANTS, RULE_CONTESTANTS
+    from silo.universe import UK_CANDIDATES
+
+    if args.symbols:
+        symbols = args.symbols
+    elif args.all_candidates:
+        symbols = [s for s in UK_CANDIDATES if vault.snapshots(s)]
+    else:
+        symbols = json.loads(Path(args.symbols_file).read_text())
+    tables = vault.tables(symbols)
+    symbols = [s for s in symbols if len(tables[s]) > 260]
+    names = args.only or (RULE_CONTESTANTS + (AI_CONTESTANTS if args.with_ai else []))
+    if any(REGISTRY[n].uses_llm for n in names):
+        if not os.environ.get("SILO_LLM"):
+            print("AI contestants need SILO_LLM (e.g. ollama:qwen2.5:7b)")
+            return 2
+        os.environ.setdefault("SILO_LLM_LOG", str(Path(args.out) / "llm"))  # shared cache: silo_agent reuses desk/panel
+    print(f"{len(names)} contestant(s) on {len(symbols)} symbols, {args.start or 'start'} to {args.end or 'end'}")
+    entries, bench = run_league_backtest(names, symbols, tables, args.start, args.end, **_rules(args, symbols))
+    page, data = write(entries, bench, args.out, args.title)
+    print(f"\nreport: {page}\ndata:   {data}\n{DISCLAIMER}")
+    return 0
+
+
+def cmd_check_data(args) -> int:
+    from silo.lab.league_backtest import data_check
+    from silo.universe import UK_CANDIDATES
+
+    vault = DataVault(args.data_dir)
+    symbols = args.symbols or [s for s in UK_CANDIDATES if vault.snapshots(s)]
+    table = data_check({s: vault.get_bars(s) for s in symbols})
+    with pd.option_context("display.max_rows", None, "display.width", 160):
+        print(table.to_string())
+    bad = list(table.index[table["suspect"].astype(bool)])
+    print(f"\n{len(bad)} suspect series: {' '.join(bad)}")
+    return 0
+
+
 def cmd_league(args) -> int:
     from silo.league import create_league
 
     vault = DataVault(args.data_dir)
+    if args.action == "backtest":
+        return _league_backtest(args, vault)
     symbols = args.symbols or json.loads(Path(args.symbols_file).read_text())
     rules = _rules(args, symbols)
     made = create_league(symbols, vault, args.paper_dir, args.prefix, args.with_ai, args.cash,
@@ -291,9 +353,20 @@ def cmd_daily(args) -> int:
         from silo.brokers.trading212 import Trading212Demo
         from silo.paper import PaperBook, mirror_latest_decision
 
+        mbook = PaperBook(args.mirror, args.paper_dir)
         try:
-            sent = mirror_latest_decision(PaperBook(args.mirror, args.paper_dir), Trading212Demo(),
-                                          fractional=args.fractional)
+            from silo.fills import collect_fills, gap_report, save_gap
+
+            got = collect_fills(mbook, Trading212Demo())
+            gap, summary = gap_report(mbook)
+            save_gap(mbook, gap, summary)
+            if got:
+                print(f"\nTrading 212 Practice ({args.mirror}): {len(got)} new fill(s) logged; "
+                      f"median gap to simulator {summary.get('median_slippage_bps', float('nan')):+.1f} bp")
+        except Exception as exc:  # noqa: BLE001 - fills are a report; never block mirroring
+            print(f"\nTrading 212 Practice fills not collected: {exc}")
+        try:
+            sent = mirror_latest_decision(mbook, Trading212Demo(), fractional=args.fractional)
             print(f"\nTrading 212 Practice ({args.mirror}): {len(sent)} order(s) sent" if sent else
                   f"\nTrading 212 Practice ({args.mirror}): no new rebalance to mirror")
             for e in sent:
@@ -402,7 +475,7 @@ def main(argv: list[str] | None = None) -> int:
     u.set_defaults(func=cmd_universe)
 
     pp = sub.add_parser("paper", help="forward paper trading on the simulator")
-    pp.add_argument("action", choices=["new", "run", "status", "t212-map", "t212-check"])
+    pp.add_argument("action", choices=["new", "run", "status", "t212-map", "t212-check", "t212-fills"])
     pp.add_argument("name")
     pp.add_argument("--paper-dir", default="paper")
     pp.add_argument("--strategy", choices=STUDY_STRATEGIES, default="uk_trend")
@@ -418,7 +491,8 @@ def main(argv: list[str] | None = None) -> int:
     pp.set_defaults(func=cmd_paper)
 
     lg = sub.add_parser("league", help="one paper book per contestant on the same universe")
-    lg.add_argument("action", choices=["new"])
+    lg.add_argument("action", choices=["new", "backtest"],
+                    help="new: start paper books; backtest: replay history for every contestant")
     lg.add_argument("--symbols", nargs="*")
     lg.add_argument("--symbols-file", default="uk.json", help="JSON list, e.g. from `silo universe uk --save`")
     lg.add_argument("--prefix", default="league")
@@ -426,8 +500,19 @@ def main(argv: list[str] | None = None) -> int:
                     help="add the AI contestants: desk, panel, silo_agent and their cross-market versions (needs SILO_LLM)")
     lg.add_argument("--cash", type=float, default=100_000.0)
     lg.add_argument("--paper-dir", default="paper")
+    lg.add_argument("--start", help="backtest: first date, e.g. 2012-01-01")
+    lg.add_argument("--end", help="backtest: last date")
+    lg.add_argument("--only", nargs="*", choices=list(REGISTRY), help="backtest: just these contestants")
+    lg.add_argument("--all-candidates", action="store_true",
+                    help="backtest: every UK candidate with data, instead of today's screened list (less look-ahead)")
+    lg.add_argument("--out", default="reports/league", help="backtest: folder for league.html and league.json")
+    lg.add_argument("--title", default="League backtest")
     _add_rule_flags(lg)
     lg.set_defaults(func=cmd_league)
+
+    cd = sub.add_parser("check-data", help="flag stale or broken price series in the vault")
+    cd.add_argument("symbols", nargs="*")
+    cd.set_defaults(func=cmd_check_data)
 
     dy = sub.add_parser("daily", help="fetch prices, advance every paper book, print the leaderboard")
     dy.add_argument("--paper-dir", default="paper")

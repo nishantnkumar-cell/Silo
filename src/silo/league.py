@@ -21,7 +21,9 @@ from silo.paper import PaperBook
 RULE_CONTESTANTS = ["uk_trend", "momentum", "blend", "sector_mom", "macro_tilt", "news_mom", "results_drift",
                     "director_buys", "random"]
 # The luck control rebalances about once a month into a random ~90% of names.
-PARAMS = {"random": {"decide_prob": 0.25, "exposure": 0.9}}
+# Momentum was written for short ETF lists (top 3); on ~100 shares it holds 15. Its variants match.
+PARAMS = {"random": {"decide_prob": 0.25, "exposure": 0.9}, "momentum": {"top_k": 15},
+          "macro_tilt": {"top_k": 15}, "news_mom": {"top_k": 15}}
 AI_CONTESTANTS = ["desk", "panel", "silo_agent", "panel_macro", "desk_macro", "panel_news", "desk_news",
                   "panel_full", "desk_full"]
 
