@@ -113,15 +113,24 @@ class PaperBook:
         with (self.dir / "journal.jsonl").open("a") as f:
             f.write(json.dumps(entry, default=_json) + "\n")
 
-    def run(self, vault: DataVault) -> list[dict]:
-        """Process every new trading day since the last run. Safe to repeat."""
+    def run(self, vault: DataVault, now: pd.Timestamp | None = None) -> list[dict]:
+        """Process every new trading day since the last run. Safe to repeat.
+
+        A day is processed only once all its bars are final (public by
+        ``now``), so a partial bar from a market still trading is never used.
+        """
         cfg = self.config()
         state = self._load()
         tables = {s: vault.get_bars(s) for s in cfg["symbols"]}
         data = MarketData(tables)
         start_after = pd.Timestamp(cfg["start_after"])
         done = state["book"].last_date or start_after
-        new_days = [d for d in data.dates if d > max(done, start_after)]
+        now = pd.Timestamp.now(tz="UTC") if now is None else pd.Timestamp(now)
+
+        def final(d):
+            return all(r[d][2] <= now for r in data.rows.values() if d in r)
+
+        new_days = [d for d in data.dates if d > max(done, start_after) and final(d)]
         events = []
         for date in new_days:
             ev = state["book"].step(date, data)

@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 
 from silo.lab.regimes import regime_table
-from silo.lab.study import ANNUAL, LabResult
+from silo.lab.study import LabResult
 
 DISCLAIMER = "Research only. Simulated results, not financial advice. Silo never trades real money."
 
@@ -98,8 +98,8 @@ def render(result: LabResult) -> str:
     )
     folds = "\n".join(
         f"<tr><td>{f.train_start.date()} to {f.train_end.date()}</td><td>{f.test_start.date()} to {f.test_end.date()}</td>"
-        f"<td><code>{html.escape(json.dumps(f.params))}</code></td><td>{_num(f.train_sharpe * ANNUAL)}</td>"
-        f"<td>{_num(f.test_sharpe * ANNUAL)}</td></tr>"
+        f"<td><code>{html.escape(json.dumps(f.params))}</code></td><td>{_num(f.train_sharpe * result.annual)}</td>"
+        f"<td>{_num(f.test_sharpe * result.annual)}</td></tr>"
         for f in wf.folds
     )
     charts = {
