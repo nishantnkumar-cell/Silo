@@ -35,7 +35,7 @@ from silo.metrics import summarize
 from silo.strategies import REGISTRY
 
 DISCLAIMER = "Research only. Simulated results, not financial advice. Silo never trades real money."
-PARAMS = {"random": {"decide_prob": 0.25, "exposure": 0.9}}
+from silo.league import PARAMS  # noqa: E402 - same settings as the paper league
 
 
 @dataclass

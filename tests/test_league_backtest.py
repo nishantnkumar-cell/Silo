@@ -45,3 +45,35 @@ def test_data_check_flags_flat_and_stale_series():
     assert out.loc["T1.L", "suspect"] and out.loc["T1.L", "longest_flat_run"] >= 59
     assert out.loc["T2.L", "suspect"] and out.loc["T2.L", "days_behind"] >= 29
     assert not out.loc["T0.L", "suspect"]
+
+
+def test_benchmark_and_momentum_trade_when_some_stocks_list_later():
+    from silo.engine import run_backtest
+    from silo.strategies.classic import BuyAndHold, Momentum12_1
+
+    syms, t = uk(n=6, n_days=900)
+    t["T5.L"] = t["T5.L"].iloc[600:]  # lists late
+    bh = run_backtest(BuyAndHold(syms), t, costs=CostModel.uk())
+    assert len(bh.fills) == 5 and bh.metrics()["total_return"] != 0
+    mom = run_backtest(Momentum12_1(syms, top_k=2), t, costs=CostModel.uk())
+    assert mom.fills["date"].min() < t["T5.L"].index[0]
+
+
+def test_young_positions_never_push_the_book_over_100_percent():
+    from silo.constraints import apply_constraints
+
+    c = Constraints.position_trading()
+    current = {"A": 0.5, "B": 0.4995}
+    out = apply_constraints({"A": 0.6, "B": 0.5}, current, {"A": 3, "B": 3}, c)
+    assert sum(out.values()) <= 1 + 1e-9
+    assert out["A"] >= 0.5 and out["B"] >= 0.4995
+
+
+def test_rebalance_band_skips_small_resizes():
+    from silo.constraints import apply_constraints
+
+    c = Constraints.position_trading()
+    out = apply_constraints({"A": 0.06, "B": 0.09, "C": 0.05}, {"A": 0.05, "B": 0.05},
+                            {"A": 40, "B": 40}, c)
+    assert out["A"] == 0.05  # +1%: not worth a fee
+    assert out["B"] > 0.05 and out["C"] > 0  # real changes and new names still trade
