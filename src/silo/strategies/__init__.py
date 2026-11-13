@@ -28,9 +28,10 @@ REGISTRY = {
 from silo.agents.blend import Blend, SiloAgent  # noqa: E402 - these build members from REGISTRY
 from silo.agents.contestants import DebateDesk, StylePanel  # noqa: E402
 from silo.agents.rulebook import CoreDesk  # noqa: E402
+from silo.learning.lessons import Learned  # noqa: E402 - wraps any agent above with gated lessons
 
 REGISTRY.update({"desk": DebateDesk, "panel": StylePanel, "blend": Blend, "silo_agent": SiloAgent,
-                 "core_desk": CoreDesk})
+                 "core_desk": CoreDesk, "learned": Learned})
 
 __all__ = [
     "REGISTRY",
