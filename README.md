@@ -256,4 +256,8 @@ coded, and which rules can't be tested) and implemented three ways:
 ```bash
 silo league backtest --all-candidates --start 2012-01-01 --only core_zones core_trail core_managed momentum random --out reports/league-core
 silo lab --all-candidates --strategy core_zones --out reports/lab-core
+silo zones --out reports/zones.html
 ```
+
+`silo zones` shows today's demand and supply zones for every stock, with a verdict (in buy zone,
+wait for pull-back, supply too close, no trade), as `reports/zones.html` on the dashboard.

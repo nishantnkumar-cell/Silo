@@ -221,3 +221,25 @@ def test_core_managed_needs_1_to_4(tables):
     assert s.min_reward_risk == 4.0
     for b in (x for x in s.log if x["action"] == "buy"):
         assert b["stop"] < b["entry"] and b["target"] is None
+
+
+def test_zones_report_shows_supply_and_a_verdict(tmp_path):
+    from silo.cli import main
+
+    out = tmp_path / "zones.html"
+    assert main(["zones", "--demo", "--out", str(out)]) == 0
+    page = out.read_text()
+    assert "rect class='supply'" in page and "Research only" in page
+    from silo.lab.zones_report import zone_row
+
+    rows = _tables_from(DBR * 40)
+    r = zone_row("AAA", rows["AAA"])
+    assert r is not None and r.verdict in ("in buy zone", "wait for pull-back", "supply too close", "no trade")
+
+
+def test_supply_wicked_through_is_used_up():
+    from silo.strategies.core_zones import Zone
+
+    z = Zone("supply", "RBD", 100.0, 102.0, 0, 1, 2, 1, 3.0, True, penetration=1.4)
+    assert z.used_up and not z.violated and z.freshness == 0.0
+    assert not Zone("supply", "RBD", 100.0, 102.0, 0, 1, 2, 1, 3.0, True, penetration=0.4).used_up

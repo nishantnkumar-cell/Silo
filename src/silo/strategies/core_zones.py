@@ -153,6 +153,15 @@ class Zone:
         return 1.0 if self.penetration <= 0.5 else 0.0
 
     @property
+    def used_up(self) -> bool:
+        """Price has already traded through the far line (a wick, not a close): the orders are gone.
+
+        Not a violation in the manual's sense, but such a zone no longer counts
+        as the opposing zone that caps a trade's profit.
+        """
+        return self.violated or self.penetration >= 1.0
+
+    @property
     def structure(self) -> float:
         return self.strength + self.time + self.freshness
 
@@ -445,7 +454,7 @@ def score_demand(z: Zone, ltf: Bars, zones: list[Zone], tr: Trend, cv: Curve, ht
     entry = z.proximal
     stop = z.distal - stop_buffer
     risk = entry - stop
-    above = [s.proximal for s in zones if s.kind == "supply" and not s.violated and s.proximal > max(entry, price)]
+    above = [s.proximal for s in zones if s.kind == "supply" and not s.used_up and s.proximal > max(entry, price)]
     target_zone = min(above) if above else None
     if target_zone is None:
         htf_above = [s.proximal for s in htf_supply if s.proximal > max(entry, price)]
@@ -502,13 +511,13 @@ def analyze(daily: pd.DataFrame, ltf_lookback: int = 260, itf_lookback: int = 78
         if htf_cache is not None:
             htf_cache[key] = htf_done
     cv = curve(htf_done, price)
-    htf_supply = [z for z in find_zones(htf_done) if z.kind == "supply" and not z.violated] if len(htf_done) else []
+    htf_supply = [z for z in find_zones(htf_done) if z.kind == "supply" and not z.used_up] if len(htf_done) else []
     zones = find_zones(ltf)
     buffer = stop_atr * a
     demand = [z for z in zones if z.kind == "demand" and not z.violated and z.proximal <= price * 1.10]
     setups = [score_demand(z, ltf, zones, tr, cv, htf_supply, buffer, price) for z in demand]
     setups.sort(key=lambda s: (-s.score, -s.zone.proximal))
-    supply = sorted((z for z in zones if z.kind == "supply" and not z.violated and z.proximal > price),
+    supply = sorted((z for z in zones if z.kind == "supply" and not z.used_up and z.proximal > price),
                     key=lambda z: z.proximal)
     return Analysis(setups, supply, tr, cv, a, price)
 
