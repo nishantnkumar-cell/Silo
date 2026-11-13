@@ -59,6 +59,10 @@ class LLMStrategy(Strategy):
     def ask(self, role: str, system: str, prompt: str, clock) -> dict:
         return parse_json(self.llm.complete(f"{RULES}\n\n{system}", prompt, role=f"{self.name}:{role}", clock=clock))
 
+    def brief(self, view):
+        """The numbers this agent is shown. Subclasses may add columns."""
+        return build_brief(view, self.symbols, self.anonymize, limit=self.shortlist)
+
     def weights_for(self, picks: list[str], brief) -> dict[str, float]:
         picks = list(dict.fromkeys(picks))[: self.top_k]
         if not picks:
@@ -75,7 +79,7 @@ class DebateDesk(LLMStrategy):
     name = "desk"
 
     def decide(self, view):
-        brief = build_brief(view, self.symbols, self.anonymize, limit=self.shortlist)
+        brief = self.brief(view)
         if not brief.rows:
             return {}
         table = f"{brief.market}\n\n{brief.table()}"
@@ -121,7 +125,7 @@ class StylePanel(LLMStrategy):
         self.styles = list(styles or STYLES)
 
     def decide(self, view):
-        brief = build_brief(view, self.symbols, self.anonymize, limit=self.shortlist)
+        brief = self.brief(view)
         if not brief.rows:
             return {}
         table = f"{brief.market}\n\n{brief.table()}"
