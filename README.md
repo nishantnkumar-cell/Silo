@@ -73,6 +73,20 @@ market orders to a Trading 212 *Practice* account (`demo.trading212.com`).
 Silo from starting, every order is logged as an intent before it is sent so a
 rerun never duplicates it, and `t212-check` compares the two books.
 
+**Practice fills against the simulator** (`src/silo/fills.py`): Trading 212's
+API has no price history, but it does report how each Practice order filled.
+`silo paper t212-fills BOOK` reads the account's order history (read-only),
+appends each mirrored order's fill to `mirror.jsonl` once, pairs it with
+SimBroker's fill for the same rebalance, and reports the gap: price slippage
+in basis points (positive = Practice did worse), each venue's distance from
+the day's open, fees as a share of traded value (stamp duty and any FX fee),
+and hours from order to fill. `paper run --mirror t212` and
+`daily --mirror BOOK` collect fills on every run, and the book's dashboard page
+shows the table. After 10 paired fills it prints the slippage setting that
+would match, but never changes the CostModel itself. The Practice API key
+needs the `history:orders` permission. Practice fills are Trading 212's own
+simulation, so they are a calibration check, not real executions.
+
 ## Dashboard
 
 `silo web` opens a local dashboard at <http://127.0.0.1:8212/> (`src/silo/web.py`, standard library only):
@@ -113,6 +127,7 @@ export T212_DEMO_API_KEY=... T212_DEMO_API_SECRET=...   # key created in Practic
 silo paper t212-map uk-trend                # propose Yahoo -> Trading 212 tickers; review the file
 silo paper run uk-trend --fetch --mirror t212
 silo paper t212-check uk-trend              # simulator vs Practice account weights
+silo paper t212-fills uk-trend              # Practice fill prices and fees vs the simulator's
 
 silo fetch SPY QQQ IWM TLT GLD              # free daily bars from Yahoo
 silo backtest SPY QQQ IWM TLT GLD           # every baseline vs buy-and-hold

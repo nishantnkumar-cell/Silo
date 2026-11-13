@@ -38,6 +38,7 @@ MIN_INTERVAL = {
     "/equity/positions": 1.0,
     "/equity/orders": 1.0,
     "/equity/orders/market": 1.3,
+    "/equity/history/orders": 3.0,  # 20 per minute
 }
 
 Transport = Callable[[str, str, dict, bytes | None], tuple[int, dict, Any]]
@@ -133,6 +134,29 @@ class Trading212Demo:
         out = self._request("GET", "/equity/orders")
         return out.get("items", out) if isinstance(out, dict) else (out or [])
 
+    def order_history(self, max_pages: int = 10, stop_before: str | None = None, limit: int = 50):
+        """Historical orders with their fills, newest first, page by page.
+
+        Read-only. Stops after ``max_pages`` pages, or once a page reaches
+        orders created before ``stop_before`` (an ISO time). The API key needs
+        the ``history:orders`` scope.
+        """
+        path = f"/equity/history/orders?limit={int(limit)}"
+        cutoff = _utc(stop_before) if stop_before else None
+        for _ in range(max_pages):
+            page = self._request("GET", path) or {}
+            items = page.get("items", []) if isinstance(page, dict) else page
+            yield from items
+            nxt = page.get("nextPagePath") if isinstance(page, dict) else None
+            if not nxt or not items:
+                return
+            if cutoff is not None:
+                times = [_utc((i.get("order") or {}).get("createdAt")) for i in items]
+                oldest = min((t for t in times if t), default=None)
+                if oldest is not None and oldest < cutoff:
+                    return
+            path = "/" + nxt.split("/api/v0/", 1)[-1].lstrip("/")
+
     # orders (Practice account only)
     def market_order(self, ticker: str, quantity: float) -> dict:
         """Positive quantity buys, negative sells. Not idempotent: callers must dedupe."""
@@ -141,6 +165,16 @@ class Trading212Demo:
         return self._request(
             "POST", "/equity/orders/market", {"ticker": ticker, "quantity": quantity, "extendedHours": False}
         )
+
+
+def _utc(value):
+    from datetime import datetime, timezone
+
+    try:
+        t = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return t if t.tzinfo else t.replace(tzinfo=timezone.utc)
 
 
 def propose_mapping(symbols: list[str], instruments: list[dict]) -> dict[str, str | None]:
