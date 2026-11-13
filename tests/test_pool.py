@@ -116,3 +116,13 @@ def test_cli_pool_and_universe(tmp_path, monkeypatch):
     assert main(["--data-dir", str(tmp_path / "data"), "universe", "us", "--candidates",
                  str(out / "us-candidates.json"), "--save", str(saved)]) == 0
     assert json.loads(saved.read_text()) == ["AAPL"]
+
+
+def test_fetch_skips_empty_series_instead_of_crashing(tmp_path, monkeypatch, capsys):
+    import silo.cli as cli
+
+    good = _bars(0.001, n=30)
+    monkeypatch.setitem(cli.SOURCES, "yfinance", lambda s: good if s == "OK" else good.iloc[:0])
+    assert cli.main(["--data-dir", str(tmp_path), "fetch", "EMPTY", "OK"]) == 0
+    out = capsys.readouterr().out
+    assert "EMPTY: skipped" in out and "OK: 30 bars" in out

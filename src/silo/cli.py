@@ -122,11 +122,17 @@ def cmd_fetch(args) -> int:
         if i and args.pause:
             time.sleep(args.pause)  # be gentle with the data source on long lists
         try:
-            stored = vault.put_bars(symbol, SOURCES[args.source](symbol))
+            bars = SOURCES[args.source](symbol)
+            if bars is None or len(bars) == 0:
+                raise ValueError("no data")
+            stored = vault.put_bars(symbol, bars)
+            if len(stored) == 0:
+                raise ValueError("no usable bars")
         except Exception as exc:  # noqa: BLE001 - keep going, report at the end
             failed.append(f"{symbol} ({exc})")
+            print(f"{symbol}: skipped ({exc})", flush=True)  # logged as it happens, so a crash loses nothing
             continue
-        print(f"{symbol}: {len(stored)} bars, {stored.index[0].date()} to {stored.index[-1].date()}")
+        print(f"{symbol}: {len(stored)} bars, {stored.index[0].date()} to {stored.index[-1].date()}", flush=True)
     if failed:
         print("\nskipped: " + ", ".join(failed))
     return 0
