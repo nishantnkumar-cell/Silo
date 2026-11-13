@@ -10,6 +10,7 @@ from silo.strategies.classic import (
     TrendVolTarget,
     VolTarget,
 )
+from silo.strategies.core_zones import CoreManaged, CoreZones, CoreZonesTrail
 from silo.strategies.random_entry import RandomEntry
 
 REGISTRY = {
@@ -21,13 +22,18 @@ REGISTRY = {
     "momentum": Momentum12_1,
     "uk_trend": TrendQuality,
     "tsmom": TrendVolTarget,
+    "core_zones": CoreZones,
+    "core_trail": CoreZonesTrail,
+    "core_managed": CoreManaged,
     "random": RandomEntry,
 }
 
 from silo.agents.blend import Blend, SiloAgent  # noqa: E402 - these build members from REGISTRY
 from silo.agents.contestants import DebateDesk, StylePanel  # noqa: E402
+from silo.agents.rulebook import CoreDesk  # noqa: E402
 
-REGISTRY.update({"desk": DebateDesk, "panel": StylePanel, "blend": Blend, "silo_agent": SiloAgent})
+REGISTRY.update({"desk": DebateDesk, "panel": StylePanel, "blend": Blend, "silo_agent": SiloAgent,
+                 "core_desk": CoreDesk})
 
 __all__ = [
     "REGISTRY",
@@ -41,5 +47,6 @@ __all__ = [
     "VolTarget",
     "TrendQuality",
     "TrendVolTarget",
+    "CoreZones",
     "RandomEntry",
 ]

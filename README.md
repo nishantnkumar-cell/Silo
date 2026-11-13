@@ -239,3 +239,21 @@ and check the ticker file.
 * Kronos (a price-forecasting model) as a contestant, once it runs on the PN50's CPU.
 * News and filings (RNS) through the firewall, so the desk can get its missing analysts.
 * Strategy evolution: let the model propose new rules; the lab disposes.
+
+## Core Strategy rules (supply and demand)
+
+The project owner studied a supply-and-demand trading course. Its rules are written up in
+[`docs/core-strategy-rulebook.md`](docs/core-strategy-rulebook.md) (what each rule says, how it is
+coded, and which rules can't be tested) and implemented three ways:
+
+| Contestant | What it is |
+|---|---|
+| `core_zones` | Rules only. Weekly: score every active daily demand zone out of 10 (strength, time, freshness, weekly trend, monthly curve, profit zone), apply the curve x trend decision table, buy when price is back at a zone that scores 7+ (8.5+ buys at the zone, 7-8 waits for confirmation). Stop 10% of a day's range below the zone, target 75% of the way to the next supply and at least 3x the risk; 2% risk per trade, 6% in total. |
+| `core_trail` | The same entries, no fixed target: the stop trails under each new demand zone. |
+| `core_managed` | Only 1:4 or better setups; checked every day: stop hit sells all, half sold at 1:2 with the stop moved to entry, the rest trails. |
+| `core_desk` | The AI debate desk with the rulebook in its prompts and six zone readings per stock. |
+
+```bash
+silo league backtest --all-candidates --start 2012-01-01 --only core_zones core_trail core_managed momentum random --out reports/league-core
+silo lab --all-candidates --strategy core_zones --out reports/lab-core
+```
