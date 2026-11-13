@@ -107,6 +107,10 @@ def cmd_fetch(args) -> int:
 
         symbols = symbols + DAILY_UNIVERSES[args.universe]
     failed = []
+    if args.macro:
+        from silo.data.macro import fetch_all
+
+        failed += [f"macro:{n}" for n in fetch_all(vault)]
     for symbol in symbols:
         try:
             stored = vault.put_bars(symbol, SOURCES[args.source](symbol))
@@ -120,8 +124,11 @@ def cmd_fetch(args) -> int:
 
 
 def _demo_tables(n=4, n_days=2000):
+    from silo.data.macro import synthetic_macro
+
     symbols = [f"SYN{i}" for i in range(n)]
-    return symbols, {s: normalize_bars(synthetic_bars(n_days=n_days, seed=i)) for i, s in enumerate(symbols)}
+    tables = {s: normalize_bars(synthetic_bars(n_days=n_days, seed=i)) for i, s in enumerate(symbols)}
+    return symbols, tables | synthetic_macro(tables[symbols[0]].index)
 
 
 def _run_all(tables, symbols, names, start=None, end=None, **rules) -> dict[str, dict[str, float]]:
@@ -130,7 +137,7 @@ def _run_all(tables, symbols, names, start=None, end=None, **rules) -> dict[str,
 
 def cmd_backtest(args) -> int:
     vault = DataVault(args.data_dir)
-    tables = {s: vault.get_bars(s) for s in args.symbols}
+    tables = vault.tables(args.symbols)
     names = _everything() if args.strategy == "all" else ["buy_and_hold", args.strategy]
     _print_table(_run_all(tables, args.symbols, names, args.start, args.end, **_rules(args, args.symbols)))
     return 0
@@ -169,9 +176,10 @@ def cmd_lab(args) -> int:
         if not symbols:
             print("give symbols, --symbols-file, --all-candidates, or use --demo")
             return 2
-        tables = {s: vault.get_bars(s) for s in symbols}
-        symbols = [s for s in symbols if len(tables[s]) > 260]
-        tables = {s: tables[s] for s in symbols}
+        tables = vault.tables(symbols)  # bars plus cached context tables (macro, news)
+        short = {s for s in symbols if len(tables[s]) <= 260}
+        symbols = [s for s in symbols if s not in short]
+        tables = {k: v for k, v in tables.items() if k not in short}
     if args.strategy != "all":
         names = [args.strategy]
     elif args.style == "daily":
@@ -310,7 +318,7 @@ def _league_backtest(args, vault) -> int:
         symbols = [s for s in UK_CANDIDATES if vault.snapshots(s)]
     else:
         symbols = json.loads(Path(args.symbols_file).read_text())
-    tables = {s: vault.get_bars(s) for s in symbols}
+    tables = vault.tables(symbols)
     symbols = [s for s in symbols if len(tables[s]) > 260]
     names = args.only or (RULE_CONTESTANTS + (AI_CONTESTANTS if args.with_ai else []))
     if any(REGISTRY[n].uses_llm for n in names):
@@ -368,6 +376,17 @@ def cmd_daily(args) -> int:
     vault = DataVault(args.data_dir)
     if not args.no_fetch:
         failed = fetch_for_books(vault, args.paper_dir, SOURCES[args.source])
+        if args.news:
+            from silo.data.news import fetch_news
+            from silo.league import book_names
+            from silo.paper import PaperBook
+
+            symbols = sorted({s for n in book_names(args.paper_dir) for s in PaperBook(n, args.paper_dir).config()["symbols"]})
+            failed += [f"news:{s}" for s in fetch_news(vault, symbols, delay=args.news_delay, log=lambda m: None)]
+        if not args.no_macro:
+            from silo.data.macro import fetch_all
+
+            failed += [f"macro:{n}" for n in fetch_all(vault, log=lambda m: None)]
         if failed:
             print(f"{len(failed)} symbol(s) not refreshed: {' '.join(failed)}")
     board = run_all(vault, args.paper_dir)
@@ -410,6 +429,56 @@ def cmd_daily(args) -> int:
     return code
 
 
+def _news_symbols(args) -> list[str]:
+    if args.symbols:
+        return args.symbols
+    path = Path(args.symbols_file)
+    if path.exists():
+        return json.loads(path.read_text())
+    from silo.universe import UK_CANDIDATES
+
+    return UK_CANDIDATES
+
+
+def cmd_news(args) -> int:
+    """Company announcements (RNS) for the news agent. Personal use; fetched slowly, stored locally."""
+    from silo.data import news
+
+    vault = DataVault(args.data_dir)
+    if args.action == "fetch":
+        symbols = _news_symbols(args)
+        print(f"fetching announcements for {len(symbols)} companies, one request every {args.delay:g}s; "
+              "safe to stop and rerun, it resumes where it left off")
+        failed = news.fetch_news(vault, symbols, since=args.since, delay=args.delay)
+        if failed:
+            print(f"failed: {' '.join(failed)}")
+        return 0
+    try:
+        table = vault.get_context(news.TABLE)
+    except KeyError:
+        print("no announcements stored yet; run `silo news fetch` first")
+        return 1
+    if args.action == "show":
+        rows = table[table["symbol"].isin(_news_symbols(args))] if args.symbols else table
+        cols = [c for c in ["symbol", "available_at", "category", "expect", "dealing", "headline"] if c in rows]
+        with pd.option_context("display.max_rows", None, "display.width", 200, "display.max_colwidth", 70):
+            print(rows[cols].tail(args.limit or 40).to_string())
+        print("\n" + rows["category"].value_counts().to_string())
+        return 0
+    from silo.agents.llm import client_from_spec
+    from silo.agents.news_extract import probe, run_extraction
+
+    client = client_from_spec(log_dir=Path(args.data_dir) / "news_llm_log")
+    if args.action == "extract":
+        run_extraction(vault, client, limit=args.limit)
+    else:
+        res = probe(vault, client, n=args.limit or 50)
+        print(f"asked {res['asked']}: model named the company {res['company_hit_rate'] or 0:.0%} of the time "
+              f"and the year {res['year_hit_rate'] or 0:.0%}. Well above zero means masking leaks; treat its "
+              f"answers before its training cutoff ({client.cutoff}) with suspicion.")
+    return 0
+
+
 def cmd_web(args) -> int:
     from silo.web import serve
 
@@ -435,10 +504,11 @@ def _learn_data(args):
             symbols = args.symbols
         else:
             symbols = json.loads(Path(args.symbols_file).read_text())
-        tables = {s: vault.get_bars(s) for s in symbols}
-        symbols = [s for s in symbols if len(tables[s]) > 260]
-        tables = {s: tables[s] for s in symbols}
-    dates = sorted(set().union(*(df.index for df in tables.values())))
+        tables = vault.tables(symbols)  # bars plus cached context tables (macro, news)
+        short = {s for s in symbols if len(tables[s]) <= 260}
+        symbols = [s for s in symbols if s not in short]
+        tables = {k: v for k, v in tables.items() if k not in short}
+    dates = sorted(set().union(*(tables[s].index for s in symbols)))
     holdout_start = dates[int(len(dates) * (1 - args.holdout))]
     return symbols, tables, dates, holdout_start
 
@@ -579,6 +649,8 @@ def main(argv: list[str] | None = None) -> int:
     f.add_argument("--universe", choices=["uk", "silver", "crypto"],
                    help="also fetch a candidate list: UK shares, silver ETFs (SLV SIVR) or crypto (BTC ETH)")
     f.add_argument("--source", choices=sorted(SOURCES), default="yfinance")
+    f.add_argument("--macro", action="store_true",
+                   help="also fetch cross-market series: pound, oil, metals, gilt yield, US shares, VIX")
     f.set_defaults(func=cmd_fetch)
 
     b = sub.add_parser("backtest", help="backtest strategies against buy-and-hold")
@@ -634,7 +706,8 @@ def main(argv: list[str] | None = None) -> int:
     lg.add_argument("--symbols-file", default="uk.json", help="JSON list, e.g. from `silo universe uk --save`")
     lg.add_argument("--universe", choices=["silver", "crypto"], help="use a daily-trading universe as the symbols")
     lg.add_argument("--prefix", default="league")
-    lg.add_argument("--with-ai", action="store_true", help="add desk, panel and silo_agent (needs SILO_LLM)")
+    lg.add_argument("--with-ai", action="store_true",
+                    help="add the AI contestants: desk, panel, silo_agent and their cross-market versions (needs SILO_LLM)")
     lg.add_argument("--cash", type=float, default=100_000.0)
     lg.add_argument("--paper-dir", default="paper")
     lg.add_argument("--start", help="backtest: first date, e.g. 2012-01-01")
@@ -655,9 +728,23 @@ def main(argv: list[str] | None = None) -> int:
     dy.add_argument("--paper-dir", default="paper")
     dy.add_argument("--source", choices=sorted(SOURCES), default="yfinance")
     dy.add_argument("--no-fetch", action="store_true")
+    dy.add_argument("--no-macro", action="store_true", help="skip refreshing the cross-market series")
+    dy.add_argument("--news", action="store_true", help="also fetch new company announcements (a few minutes)")
+    dy.add_argument("--news-delay", type=float, default=3.0)
     dy.add_argument("--mirror", metavar="BOOK", help="mirror this book's newest rebalance to Trading 212 Practice")
     dy.add_argument("--fractional", action="store_true")
     dy.set_defaults(func=cmd_daily)
+
+    nw = sub.add_parser("news", help="UK company announcements (RNS) for the news agent")
+    nw.add_argument("action", choices=["fetch", "show", "extract", "probe"],
+                    help="fetch: download new announcements (slow, polite, resumable); show: list stored ones; "
+                         "extract: a local model reads results text the rules couldn't; probe: test the masking")
+    nw.add_argument("--symbols", nargs="*")
+    nw.add_argument("--symbols-file", default="uk.json")
+    nw.add_argument("--since", default="2012-01-01", help="oldest announcement to fetch")
+    nw.add_argument("--delay", type=float, default=3.0, help="seconds between requests")
+    nw.add_argument("--limit", type=int, help="rows to show, or announcements to read with the model")
+    nw.set_defaults(func=cmd_news)
 
     w = sub.add_parser("web", help="local dashboard: paper books, lab reports, Trading 212 Practice key")
     w.add_argument("--port", type=int, default=8212)

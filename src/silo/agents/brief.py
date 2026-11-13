@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import string
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 
@@ -34,10 +34,14 @@ def _labels(n: int) -> list[str]:
 
 @dataclass
 class Brief:
-    rows: dict[str, list[float]]  # symbol -> numbers in COLUMNS order (plus any extra columns)
+    rows: dict[str, list[float]]  # symbol -> numbers in COLUMNS order, then any extra columns
     alias: dict[str, str]  # symbol -> label shown to the model
     market: str
-    header: str = HEADER
+    extra: list[str] = field(default_factory=list)  # headers of columns added by context agents
+
+    @property
+    def header(self) -> str:
+        return HEADER + "".join(f" | {h}" for h in self.extra)
 
     @property
     def unalias(self) -> dict[str, str]:
@@ -48,9 +52,17 @@ class Brief:
         lines = [self.header]
         for s in names:
             v = self.rows[s]
-            lines.append(f"{self.alias[s]} | " + " | ".join(f"{x:+.1f}" if i < 8 else f"{x:.1f}"
+            lines.append(f"{self.alias[s]} | " + " | ".join(f"{x:+.1f}" if i != 8 else f"{x:.1f}"
                                                           for i, x in enumerate(v)))
         return "\n".join(lines)
+
+    def add_columns(self, columns: list[tuple[str, dict[str, float]]]) -> None:
+        """Append columns (header, symbol -> value) to every row; missing values are 0."""
+        for header, values in columns:
+            self.extra.append(header)
+            for s, row in self.rows.items():
+                v = values.get(s, 0.0)
+                row.append(float(v) if v is not None and np.isfinite(v) else 0.0)
 
     def to_symbols(self, labels) -> list[str]:
         back = self.unalias
@@ -104,10 +116,10 @@ def build_brief(
     order = sorted(symbols, key=lambda s: hashlib.sha256(s.encode()).hexdigest())
     alias = dict(zip(order, _labels(len(order)))) if anonymize else {s: s for s in symbols}
     alias = {s: alias[s] for s in rows}
-    header = HEADER
+    extra_headers = []
     if extra is not None:
         suffix, fn = extra
-        header = f"{HEADER} | {suffix}"
+        extra_headers.append(suffix)
         rows = {s: v + list(fn(view, s)) for s, v in rows.items()}
     if rows:
         m3 = np.mean([v[1] for v in rows.values()])
@@ -117,4 +129,4 @@ def build_brief(
                   f"{above:.0%} trade above their 200-day average; median volatility {vol:.0f}%.")
     else:
         market = "Market: no stocks have enough history yet."
-    return Brief(rows, alias, market, header)
+    return Brief(rows, alias, market, extra_headers)

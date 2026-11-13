@@ -161,8 +161,15 @@ class RuleBot(LLMClient):
         if '"lessons"' in prompt:  # trade review: adopt the strongest statistical candidate, if any
             m = re.search(r"^CANDIDATE (\{.*\})$", prompt, re.M)
             return json.dumps({"lessons": [json.loads(m.group(1))] if m else []})
-        rows = {}
+        if '"vs_expectations"' in prompt:
+            return json.dumps({"vs_expectations": "not said", "tone": 0})
+        if '"company_guess"' in prompt:
+            return json.dumps({"company_guess": "unknown", "year_guess": "unknown"})
+        rows, header = {}, []
         for line in prompt.splitlines():
+            if line.startswith("id | ") and not header:
+                header = [c.strip() for c in line.split("|")[1:]]
+                continue
             m = _NUM.match(line.strip())
             if not m:
                 continue
@@ -177,7 +184,20 @@ class RuleBot(LLMClient):
             score = {k: v[7] - 0.05 * v[4] for k, v in rows.items()}
         if "defensive" in system.lower() or "risk" in system.lower():
             score = {k: -v[4] - 0.5 * abs(v[6]) for k, v in rows.items()}
+        def col(v, name):  # an extra column by its header, 0 when absent
+            i = header.index(name) if name in header else -1
+            return v[i] if 0 <= i < len(v) else 0.0
+
+        if "event-driven" in system.lower():
+            score = {k: col(v, "results-day move vs market %") + 5 * col(v, "last update vs expectations (+1 ahead, -1 below)")
+                     + 0.5 * col(v, "6-month % on news days") - 10 * col(v, "profit warning in 90 days (1 = yes)")
+                     + 2 * col(v, "director buys in 90 days") for k, v in rows.items()}
+        if "cross-market" in system.lower():
+            score = {k: col(v, "sector vs market 6-month %") + col(v, "macro-implied 3-month %")
+                     for k, v in rows.items()}
         ranked = sorted(score, key=lambda k: -score[k])
+        if '"favours"' in prompt:
+            return json.dumps({"note": "rulebot", "favours": ranked[:5], "avoids": ranked[::-1][:5]})
         if '"scores"' in prompt:
             n = max(1, len(ranked))
             return json.dumps({"scores": {k: round(1 - 2 * i / n, 2) for i, k in enumerate(ranked)},
