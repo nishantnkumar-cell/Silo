@@ -33,6 +33,16 @@ class Constraints:
         base.update(overrides)
         return cls(**base)
 
+    @classmethod
+    def daily_trading(cls, **overrides) -> Constraints:
+        """Daily-bar trading for a separate silver/crypto book (not intraday):
+        decide at each daily close, fill at the next open, hold at least one
+        full day, at most 50% in one name, and the liquidity rules on."""
+        base = dict(rebalance="daily", min_hold_days=1, max_turnover=None, max_weight=0.5,
+                    liquidity=Liquidity())
+        base.update(overrides)
+        return cls(**base)
+
 
 def is_rebalance_day(date: pd.Timestamp, previous: pd.Timestamp | None, rule: str) -> bool:
     """True on the first trading day of each new period. Uses no future data."""
@@ -69,6 +79,16 @@ def apply_constraints(
             scale = max(0.0, (free_sum - excess) / free_sum)
             for s in free:
                 w[s] *= scale
+        total = sum(w.values())
+        if total > 1.0:  # still over: every name is locked, so trim what the locked ones would add
+            growth = {s: w[s] - current[s] for s in locked if w[s] > current[s]}
+            room = max(0.0, 1.0 - (total - sum(growth.values())))
+            k = room / sum(growth.values()) if growth else 0.0
+            for s, g in growth.items():
+                w[s] = current[s] + g * k
+        total = sum(w.values())
+        if total > 1.0:  # drift alone left current weights a hair over 1
+            w = {s: v / total for s, v in w.items()}
 
     if c.max_turnover is not None:
         names = set(w) | set(current)

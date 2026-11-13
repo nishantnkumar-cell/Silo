@@ -6,6 +6,15 @@ import numpy as np
 import pandas as pd
 
 TRADING_DAYS = 252
+CALENDAR_DAYS = 365
+
+
+def periods_per_year(index) -> int:
+    """252 for weekday bars, 365 for markets that trade every day (crypto)."""
+    idx = pd.DatetimeIndex(index)
+    if len(idx) < 10:
+        return TRADING_DAYS
+    return CALENDAR_DAYS if float((idx.dayofweek >= 5).mean()) > 0.1 else TRADING_DAYS
 
 
 def summarize(equity: pd.Series, fills: pd.DataFrame | None = None) -> dict[str, float]:
@@ -13,6 +22,7 @@ def summarize(equity: pd.Series, fills: pd.DataFrame | None = None) -> dict[str,
     if len(equity) < 2:
         return {}
     rets = equity.pct_change().dropna()
+    TRADING_DAYS = periods_per_year(equity.index)  # noqa: N806 - shadows the default per curve
     years = len(rets) / TRADING_DAYS
     total = equity.iloc[-1] / equity.iloc[0] - 1
     vol = rets.std(ddof=1) * np.sqrt(TRADING_DAYS)

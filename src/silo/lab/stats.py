@@ -69,6 +69,7 @@ def bootstrap_sharpe_ci(
     block: int = 20,
     alpha: float = 0.05,
     seed: int = 0,
+    periods: int = TRADING_DAYS,
 ) -> tuple[float, float]:
     """Circular block bootstrap interval for the annualised Sharpe."""
     r = np.asarray(returns, dtype=float)
@@ -82,6 +83,6 @@ def bootstrap_sharpe_ci(
     idx = (starts[:, :, None] + np.arange(block)[None, None, :]).reshape(n_boot, -1)[:, :n] % n
     samples = r[idx]
     sd = samples.std(axis=1, ddof=1)
-    srs = np.where(sd > 0, samples.mean(axis=1) / np.where(sd > 0, sd, 1), 0.0) * math.sqrt(TRADING_DAYS)
+    srs = np.where(sd > 0, samples.mean(axis=1) / np.where(sd > 0, sd, 1), 0.0) * math.sqrt(periods)
     lo, hi = np.quantile(srs, [alpha / 2, 1 - alpha / 2])
     return (float(lo), float(hi))

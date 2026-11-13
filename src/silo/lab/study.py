@@ -12,7 +12,7 @@ from silo.lab.controls import random_control
 from silo.lab.holdout import HoldoutLog
 from silo.lab.stats import bootstrap_sharpe_ci, deflated_sharpe, sharpe
 from silo.lab.walkforward import WalkForwardResult, select_params, walk_forward
-from silo.metrics import summarize
+from silo.metrics import periods_per_year, summarize
 from silo.strategies.classic import BuyAndHold
 
 ANNUAL = np.sqrt(252)
@@ -38,6 +38,7 @@ class LabResult:
     random_percentile: float
     holdout: dict | None = None
     model_cutoff: str | None = None
+    annual: float = float(ANNUAL)  # sqrt(periods per year): 252 weekday bars, 365 for crypto
     checks: list[Check] = field(default_factory=list)
 
     @property
@@ -82,6 +83,7 @@ def run_study(
     reference = BacktestResult(wf.strategy, wf.equity(), pd.DataFrame(), wf.oos_decisions)
     randoms = random_control(reference, symbols, tables, n_random, start=oos_start, end=oos_end, **kwargs)
 
+    ann = float(np.sqrt(periods_per_year(oos.index)))
     sr = sharpe(oos)
     random_srs = [sharpe(r.equity.pct_change()) for r in randoms]
     pct = float(np.mean([sr > x for x in random_srs])) if random_srs else float("nan")
@@ -94,15 +96,16 @@ def run_study(
         randoms=randoms,
         holdout_start=holdout_start,
         dsr=deflated_sharpe(oos, wf.trial_sharpes),
-        sharpe_ci=bootstrap_sharpe_ci(oos),
+        sharpe_ci=bootstrap_sharpe_ci(oos, periods=periods_per_year(oos.index)),
         random_percentile=pct,
         model_cutoff=model_cutoff,
+        annual=ann,
     )
     result.checks = [
         Check(
             "Beats buy-and-hold, out of sample, after costs",
             sr > bench_sr,
-            f"Sharpe {sr * ANNUAL:.2f} vs {bench_sr * ANNUAL:.2f}",
+            f"Sharpe {sr * ann:.2f} vs {bench_sr * ann:.2f}",
         ),
         Check(
             "Survives the deflated Sharpe test",
@@ -132,7 +135,7 @@ def run_study(
             Check(
                 "Beats buy-and-hold on the locked holdout",
                 h["sharpe"] > h["benchmark_sharpe"] and not h["reopened"],
-                f"Sharpe {h['sharpe'] * ANNUAL:.2f} vs {h['benchmark_sharpe'] * ANNUAL:.2f}"
+                f"Sharpe {h['sharpe'] * ann:.2f} vs {h['benchmark_sharpe'] * ann:.2f}"
                 + (f"; holdout already opened {h['previous_openings']} time(s)" if h["reopened"] else ""),
             )
         )

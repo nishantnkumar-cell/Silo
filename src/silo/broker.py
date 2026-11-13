@@ -1,8 +1,8 @@
 """Simulated broker. The only execution venue Silo ships with.
 
 Orders are decided at a day's close and filled at the next day's open, with
-commission, half-spread, slippage and (in the UK) stamp duty charged on every
-fill. Long-only and unlevered: buys are scaled down to the cash available.
+commission, half-spread, slippage, percentage fees (crypto, FX) and (in the
+UK) stamp duty charged on every fill. Long-only and unlevered: buys are scaled down to the cash available.
 Dividends are credited as cash on the ex-date to shares held at the prior close.
 """
 
@@ -21,6 +21,8 @@ class CostModel:
     spread_bps: float = 2.0  # full quoted spread; we pay half on each fill
     slippage_bps: float = 3.0
     stamp_duty_bps: float = 0.0  # charged on buys only (UK: 50bp)
+    commission_bps: float = 0.0  # percentage fee on traded value, both sides (crypto exchanges)
+    fx_bps: float = 0.0  # currency conversion on traded value, both sides (pounds into dollars)
     llm_cost_per_decision: float = 0.0  # set when an LLM agent makes decisions
 
     @classmethod
@@ -43,8 +45,36 @@ class CostModel:
         return cls(**base)
 
     @classmethod
+    def us_from_uk(cls, **overrides) -> CostModel:
+        """US-listed ETFs bought with pounds: US costs plus a 0.15% FX fee each way
+        (Trading 212's published rate), so a round trip pays about 0.4%."""
+        base = dict(fx_bps=15.0)
+        base.update(overrides)
+        return cls(**base)
+
+    @classmethod
+    def crypto(cls, **overrides) -> CostModel:
+        """Retail crypto on a mainstream exchange: 0.25% taker fee each way, a
+        10bp spread and 10bp slippage, so a round trip costs about 0.8%.
+        Apps with a built-in markup (often 1% to 1.5%) are dearer still."""
+        base = dict(commission_per_share=0.0, min_commission=0.0, commission_bps=25.0,
+                    spread_bps=10.0, slippage_bps=10.0)
+        base.update(overrides)
+        return cls(**base)
+
+    @classmethod
     def for_market(cls, code: str) -> CostModel:
-        return cls.uk() if code == "UK" else cls()
+        return {"UK": cls.uk, "CRYPTO": cls.crypto}.get(code, cls)()
+
+    def scaled(self, k: float) -> CostModel:
+        """Every cost multiplied by ``k``: a stress test for cost assumptions."""
+        from dataclasses import replace
+
+        return replace(self, commission_per_share=self.commission_per_share * k,
+                       min_commission=self.min_commission * k, commission_flat=self.commission_flat * k,
+                       spread_bps=self.spread_bps * k, slippage_bps=self.slippage_bps * k,
+                       stamp_duty_bps=self.stamp_duty_bps * k, commission_bps=self.commission_bps * k,
+                       fx_bps=self.fx_bps * k)
 
     def fill_price(self, open_price: float, side: int) -> float:
         bump = (self.spread_bps / 2 + self.slippage_bps) / 1e4
@@ -56,9 +86,15 @@ class CostModel:
         return max(self.min_commission, self.commission_per_share * abs(qty))
 
     def fees(self, qty: float, price: float) -> float:
-        """All fees on one fill: commission plus stamp duty on buys."""
+        """All fees on one fill: commission, percentage fees, and stamp duty on buys."""
         stamp = self.stamp_duty_bps / 1e4 * qty * price if qty > 0 else 0.0
-        return self.commission(qty) + stamp
+        pct = (self.commission_bps + self.fx_bps) / 1e4 * abs(qty) * price
+        return self.commission(qty) + stamp + pct
+
+    @property
+    def buy_fee_rate(self) -> float:
+        """Fees proportional to value on a buy, as a fraction."""
+        return (self.stamp_duty_bps + self.commission_bps + self.fx_bps) / 1e4
 
 
 @dataclass
@@ -135,7 +171,7 @@ class SimBroker:
                     if not room:
                         continue
             if side > 0:
-                per_share = price * (1 + self.costs.stamp_duty_bps / 1e4)
+                per_share = price * (1 + self.costs.buy_fee_rate)
                 affordable = (self.cash - self.costs.commission(qty)) / per_share
                 qty = max(0.0, min(qty, affordable))
                 if qty * price < self.min_trade_value:

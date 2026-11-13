@@ -230,3 +230,47 @@ class TrendQuality(Strategy):
         total = sum(inv.values())
         slots = len(winners) / self.top_k  # stay partly in cash when few names qualify
         return {s: slots * v / total for s, v in inv.items()}
+
+
+class TrendVolTarget(Strategy):
+    """Daily time-series momentum with volatility targeting.
+
+    A common rule for commodities and crypto: hold a symbol while its return
+    over ``lookback`` days is positive, sized so each holding runs at about
+    ``target_vol`` annualised volatility (never more than 1/n of the book).
+    It decides every day but only trades when a signal flips or a size has
+    drifted more than ``band`` from its target, so costs stay contained.
+    """
+
+    name = "tsmom"
+    param_grid = {"lookback": [20, 60, 120], "target_vol": [0.2, 0.4]}
+
+    def __init__(self, symbols, lookback: int = 60, target_vol: float = 0.3, vol_window: int = 20,
+                 band: float = 0.25):
+        super().__init__(symbols)
+        self.lookback, self.target_vol, self.vol_window, self.band = lookback, target_vol, vol_window, band
+
+    def reset(self) -> None:
+        self.current: dict[str, float] = {}
+
+    def decide(self, view):
+        from silo.metrics import periods_per_year
+
+        n = len(self.symbols)
+        target = {}
+        for s in self.symbols:
+            c = view.close(s, lookback=max(self.lookback, self.vol_window) + 1)
+            if len(c) <= max(self.lookback, self.vol_window):
+                continue
+            if c.iloc[-1] <= c.iloc[-1 - self.lookback]:
+                continue
+            r = c.pct_change().dropna().iloc[-self.vol_window :]
+            vol = r.std(ddof=1) * np.sqrt(periods_per_year(c.index))
+            if vol > 0:
+                target[s] = min(1.0, self.target_vol / vol) / n
+        same_names = set(target) == set(self.current)
+        drift = any(abs(target[s] - self.current[s]) > self.band * self.current[s] for s in target) if same_names else True
+        if same_names and not drift:
+            return None
+        self.current = target
+        return dict(target)

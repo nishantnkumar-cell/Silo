@@ -41,8 +41,17 @@ class Liquidity:
 
     @classmethod
     def for_market(cls, code: str) -> Liquidity:
-        """Floors in each market's own units. UK: £1 a share and £5m a day."""
-        return {"UK": cls(), "US": cls(min_price=5.0, min_value_traded=2e7)}.get(code, cls())
+        """Floors in each market's own units. UK: £1 a share and £5m a day.
+
+        Crypto: at least $1bn a day of reported volume. Reported crypto volume
+        is aggregated across exchanges and partly inflated, so the floor is
+        high and each fill may take only 1% of it.
+        """
+        return {
+            "UK": cls(),
+            "US": cls(min_price=5.0, min_value_traded=2e7),
+            "CRYPTO": cls(min_price=1.0, min_value_traded=1e9, max_participation=0.01),
+        }.get(code, cls())
 
     def check(self, view: PointInTimeView, symbol: str) -> tuple[bool, float, str]:
         """(passes, largest position value allowed, reason if not)."""

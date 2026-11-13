@@ -46,8 +46,24 @@ def _print_table(rows: dict[str, dict[str, float]]) -> None:
 def _rules(args, symbols) -> dict:
     """Costs and constraints from flags; UK books get UK costs automatically."""
     market = market_for_symbols(symbols) if symbols else None
-    costs = {"auto": CostModel.for_market(market.code) if market else CostModel(), "us": CostModel(),
-             "uk": CostModel.uk(), "none": CostModel(0, 0, 0, 0, 0)}[args.costs]
+    auto = CostModel.for_market(market.code) if market else CostModel()
+    if args.style == "daily" and market and market.code == "US":
+        auto = CostModel.us_from_uk()  # a UK investor pays FX on dollar ETFs
+    costs = {"auto": auto, "us": CostModel(), "us-from-uk": CostModel.us_from_uk(), "uk": CostModel.uk(),
+             "crypto": CostModel.crypto(), "none": CostModel(0, 0, 0, 0, 0)}[args.costs]
+    if getattr(args, "cost_scale", None):
+        costs = costs.scaled(args.cost_scale)
+    liq_overrides = {k: v for k, v in {"min_price": args.min_price,
+                                       "min_value_traded": args.min_value_traded}.items() if v is not None}
+    if args.style == "daily":
+        if market is None or market.code == "UK":
+            raise SystemExit("--style daily is for the separate silver/crypto books, not UK shares")
+        liq = replace(Liquidity.for_market(market.code), **liq_overrides)
+        constraints = Constraints.daily_trading(
+            liquidity=liq,
+            **{k: v for k, v in {"min_hold_days": args.min_hold}.items() if v is not None},
+        )
+        return {"costs": costs, "constraints": constraints}
     if args.style == "position":
         liq = Liquidity.for_market(market.code if market else "UK")
         liq = replace(liq, **{k: v for k, v in {"min_price": args.min_price,
@@ -62,10 +78,14 @@ def _rules(args, symbols) -> dict:
 
 
 def _add_rule_flags(p) -> None:
-    p.add_argument("--costs", choices=["auto", "us", "uk", "none"], default="auto",
-                   help="cost model; auto picks UK costs (with stamp duty) for .L tickers")
-    p.add_argument("--style", choices=["position", "any"], default="position",
-                   help="position: weekly decisions, 20-day minimum hold, turnover and size caps")
+    p.add_argument("--costs", choices=["auto", "us", "us-from-uk", "uk", "crypto", "none"], default="auto",
+                   help="cost model; auto picks UK costs (with stamp duty) for .L tickers, exchange fees "
+                        "for crypto, and adds the FX fee for US ETFs in daily books")
+    p.add_argument("--cost-scale", type=float,
+                   help="multiply every cost, e.g. 2 to check a result survives double the costs")
+    p.add_argument("--style", choices=["position", "daily", "any"], default="position",
+                   help="position: weekly decisions, 20-day minimum hold, turnover and size caps; "
+                        "daily: separate silver/crypto books deciding on each daily close")
     p.add_argument("--rebalance", choices=["daily", "weekly", "monthly"])
     p.add_argument("--min-hold", type=int, help="minimum trading days to hold a new position")
     p.add_argument("--min-price", type=float,
@@ -81,6 +101,10 @@ def cmd_fetch(args) -> int:
         from silo.universe import UK_CANDIDATES
 
         symbols = symbols + UK_CANDIDATES
+    elif args.universe:
+        from silo.universe import DAILY_UNIVERSES
+
+        symbols = symbols + DAILY_UNIVERSES[args.universe]
     failed = []
     for symbol in symbols:
         try:
@@ -128,13 +152,24 @@ def cmd_lab(args) -> int:
     if args.demo:
         symbols, tables = _demo_tables()
     else:
+        if args.universe:
+            from silo.universe import DAILY_UNIVERSES
+
+            args.symbols = args.symbols + DAILY_UNIVERSES[args.universe]
         if not args.symbols:
             print("give symbols, or use --demo")
             return 2
         vault = DataVault(args.data_dir)
         symbols = args.symbols
         tables = {s: vault.get_bars(s) for s in symbols}
-    names = [n for n in STUDY_STRATEGIES if n in _everything()] if args.strategy == "all" else [args.strategy]
+    if args.strategy != "all":
+        names = [args.strategy]
+    elif args.style == "daily":
+        from silo.league import DAILY_CONTESTANTS
+
+        names = [n for n in DAILY_CONTESTANTS if n != "random"] + ["sma_cross"]
+    else:
+        names = [n for n in STUDY_STRATEGIES if n in _everything()]
     log = HoldoutLog(Path(args.out) / "holdout_log.jsonl")
     for name in names:
         result = run_study(
@@ -238,10 +273,15 @@ def cmd_league(args) -> int:
     from silo.league import create_league
 
     vault = DataVault(args.data_dir)
-    symbols = args.symbols or json.loads(Path(args.symbols_file).read_text())
+    if args.universe:
+        from silo.universe import DAILY_UNIVERSES
+
+        symbols = DAILY_UNIVERSES[args.universe]
+    else:
+        symbols = args.symbols or json.loads(Path(args.symbols_file).read_text())
     rules = _rules(args, symbols)
     made = create_league(symbols, vault, args.paper_dir, args.prefix, args.with_ai, args.cash,
-                         rules["constraints"], rules["costs"])
+                         rules["constraints"], rules["costs"], daily=args.style == "daily")
     for cfg in made:
         print(f"created {cfg['name']}: {cfg['strategy']} on {len(symbols)} symbols, starts after {cfg['start_after'][:10]}")
     if not made:
@@ -301,7 +341,8 @@ def main(argv: list[str] | None = None) -> int:
 
     f = sub.add_parser("fetch", help="download daily bars into the local vault (new snapshot each time)")
     f.add_argument("symbols", nargs="*")
-    f.add_argument("--universe", choices=["uk"], help="also fetch the UK candidate list")
+    f.add_argument("--universe", choices=["uk", "silver", "crypto"],
+                   help="also fetch a candidate list: UK shares, silver ETFs (SLV SIVR) or crypto (BTC ETH)")
     f.add_argument("--source", choices=sorted(SOURCES), default="yfinance")
     f.set_defaults(func=cmd_fetch)
 
@@ -322,6 +363,7 @@ def main(argv: list[str] | None = None) -> int:
     lab.add_argument("--open-holdout", action="store_true", help="evaluate on the locked holdout (logged)")
     lab.add_argument("--out", default="reports")
     lab.add_argument("--demo", action="store_true", help="use synthetic data, offline")
+    lab.add_argument("--universe", choices=["silver", "crypto"], help="study a daily-trading universe")
     _add_rule_flags(lab)
     lab.set_defaults(func=cmd_lab)
 
@@ -351,6 +393,7 @@ def main(argv: list[str] | None = None) -> int:
     lg.add_argument("action", choices=["new"])
     lg.add_argument("--symbols", nargs="*")
     lg.add_argument("--symbols-file", default="uk.json", help="JSON list, e.g. from `silo universe uk --save`")
+    lg.add_argument("--universe", choices=["silver", "crypto"], help="use a daily-trading universe as the symbols")
     lg.add_argument("--prefix", default="league")
     lg.add_argument("--with-ai", action="store_true", help="add desk, panel and silo_agent (needs SILO_LLM)")
     lg.add_argument("--cash", type=float, default=100_000.0)
