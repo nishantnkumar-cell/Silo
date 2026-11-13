@@ -18,10 +18,12 @@ from pathlib import Path
 from silo.data.vault import DataVault
 from silo.paper import PaperBook
 
-RULE_CONTESTANTS = ["uk_trend", "momentum", "blend", "sector_mom", "macro_tilt", "random"]
+RULE_CONTESTANTS = ["uk_trend", "momentum", "blend", "sector_mom", "macro_tilt", "news_mom", "results_drift",
+                    "director_buys", "random"]
 # The luck control rebalances about once a month into a random ~90% of names.
 PARAMS = {"random": {"decide_prob": 0.25, "exposure": 0.9}}
-AI_CONTESTANTS = ["desk", "panel", "silo_agent", "panel_macro", "desk_macro"]
+AI_CONTESTANTS = ["desk", "panel", "silo_agent", "panel_macro", "desk_macro", "panel_news", "desk_news",
+                  "panel_full", "desk_full"]
 
 
 def book_names(paper_dir: str | Path) -> list[str]:

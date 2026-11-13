@@ -158,6 +158,10 @@ class RuleBot(LLMClient):
     model: str = "rulebot"
 
     def _ask(self, system: str, prompt: str) -> str:
+        if '"vs_expectations"' in prompt:
+            return json.dumps({"vs_expectations": "not said", "tone": 0})
+        if '"company_guess"' in prompt:
+            return json.dumps({"company_guess": "unknown", "year_guess": "unknown"})
         rows, header = {}, []
         for line in prompt.splitlines():
             if line.startswith("id | ") and not header:
@@ -181,6 +185,10 @@ class RuleBot(LLMClient):
             i = header.index(name) if name in header else -1
             return v[i] if 0 <= i < len(v) else 0.0
 
+        if "event-driven" in system.lower():
+            score = {k: col(v, "results-day move vs market %") + 5 * col(v, "last update vs expectations (+1 ahead, -1 below)")
+                     + 0.5 * col(v, "6-month % on news days") - 10 * col(v, "profit warning in 90 days (1 = yes)")
+                     + 2 * col(v, "director buys in 90 days") for k, v in rows.items()}
         if "cross-market" in system.lower():
             score = {k: col(v, "sector vs market 6-month %") + col(v, "macro-implied 3-month %")
                      for k, v in rows.items()}

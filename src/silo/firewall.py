@@ -70,14 +70,16 @@ class PointInTimeView:
         return [n for n in self._t if n.startswith(prefix)]
 
     def context(self, name: str, lookback: int | None = None) -> pd.DataFrame:
-        """Rows of a context table public at the clock, newest last.
+        """Rows of a context table public at the clock, newest last, with ``available_at``.
 
         A missing table gives an empty frame, so agents degrade to "no
         information" instead of failing when a source was never fetched.
         """
         if name not in self._t:
             return pd.DataFrame()
-        return self.bars(name, lookback)
+        cut = self._t.cut(name, self.clock)
+        lo = 0 if lookback is None else max(0, cut - lookback)
+        return self._t[name].iloc[lo:cut].copy()  # keeps available_at: events need their timestamps
 
     def bars(self, symbol: str, lookback: int | None = None) -> pd.DataFrame:
         """Rows of ``symbol`` public at the clock (a copy), newest last."""

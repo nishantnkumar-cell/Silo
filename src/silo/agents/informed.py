@@ -2,8 +2,9 @@
 
 A *context agent* turns non-price data into numbers for the brief, plus one
 line about the market, one investing voice for the panel, one analyst for
-the desk, and a note for the risk manager. The first is the cross-market
-agent (:mod:`silo.agents.crossasset`).
+the desk, and a note for the risk manager. There are two: the cross-market
+agent (:mod:`silo.agents.crossasset`) and the news agent
+(:mod:`silo.agents.news`).
 
 The deciding model never sees raw text, sector names, series levels or
 dates: only extra numeric columns next to the anonymised ones it already
@@ -43,7 +44,32 @@ class CrossAssetAgent:
         return crossasset.exposure_line(picks, self._betas)
 
 
-AGENTS = {"macro": CrossAssetAgent}
+class NewsAgent:
+    name = "news"
+    style = ("event-driven", "You are an event-driven investor. You favour stocks that rose on their latest "
+             "results or said they are ahead of expectations, whose gains came on news days rather than quiet "
+             "days, and where directors have been buying. You avoid stocks with a recent profit warning.")
+    analyst = ("news analyst", "You are the news analyst. Use the results, expectations, warning, director "
+               "buying and news-day columns to say which stocks recent company news supports or undermines.")
+
+    def __init__(self, sectors=None):
+        pass
+
+    def prepare(self, view, symbols):
+        from silo.agents import news
+
+        cols = news.columns(view, symbols)
+        self._cols = cols
+        return [(header, cols[key]) for key, header in news.COLUMNS], news.market_line(view, symbols, cols)
+
+    def risk_note(self, picks):
+        warned = sum(1 for s in picks if self._cols["warning"].get(s, 0) > 0)
+        stale = sum(1 for s in picks if self._cols["days_since_results"].get(s, 0) >= 120)
+        return (f"News check: {warned} of these picks had a profit warning in the last 90 days; "
+                f"{stale} have not reported results for 120 trading days or more.")
+
+
+AGENTS = {"macro": CrossAssetAgent, "news": NewsAgent}
 
 
 class _Informed:
@@ -155,3 +181,19 @@ class InformedDesk(_Informed, DebateDesk):
                         "{\"veto\": [ids to drop], \"why\": \"<1 sentence>\"}", clock)
         vetoed = set(brief.to_symbols(risk.get("veto", [])))
         return self.weights_for([s for s in picks if s not in vetoed], brief)
+
+
+class NewsPanel(InformedPanel):
+    sources, name = ("news",), "panel_news"
+
+
+class NewsDesk(InformedDesk):
+    sources, name = ("news",), "desk_news"
+
+
+class FullPanel(InformedPanel):
+    sources, name = ("macro", "news"), "panel_full"
+
+
+class FullDesk(InformedDesk):
+    sources, name = ("macro", "news"), "desk_full"
