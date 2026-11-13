@@ -126,3 +126,9 @@ def test_fetch_skips_empty_series_instead_of_crashing(tmp_path, monkeypatch, cap
     assert cli.main(["--data-dir", str(tmp_path), "fetch", "EMPTY", "OK"]) == 0
     out = capsys.readouterr().out
     assert "EMPTY: skipped" in out and "OK: 30 bars" in out
+
+
+def test_known_trading212_mismatches_are_overridden():
+    bt = {"ticker": "BTl_EQ", "type": "STOCK", "currencyCode": "GBX", "isin": "GB0030913577", "name": "BT Group"}
+    asos = {"ticker": "ASOSl_EQ", "type": "STOCK", "currencyCode": "GBX", "isin": "GB0030927254", "name": "ASOS"}
+    assert yahoo_symbol(bt) == ("UK", "BT-A.L") and yahoo_symbol(asos) == ("UK", "ASC.L")

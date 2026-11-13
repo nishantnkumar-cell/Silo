@@ -267,6 +267,8 @@ def cmd_pool(args) -> int:
 
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
+    if args.action == "resolve":
+        return _pool_resolve(args, out)
     instruments = Trading212Demo().instruments()
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     snap = out / f"t212-instruments-{stamp}.json"
@@ -281,6 +283,33 @@ def cmd_pool(args) -> int:
     print(f"{len(instruments)} instruments listed; snapshot kept at {snap}")
     print("next: silo fetch --symbols-file pool/us-candidates.json --pause 1, "
           "then silo universe us --candidates pool/us-candidates.json --top 60 --save us.json")
+    return 0
+
+
+def _pool_resolve(args, out: Path) -> int:
+    """Re-map candidates Yahoo had no data for, by ISIN, and rewrite the candidate list."""
+    from silo.universe.pool import candidates_from_instruments, resolve_by_isin
+
+    snaps = sorted(out.glob("t212-instruments-*.json"))
+    if not snaps:
+        print("no instrument snapshot yet; run `silo pool instruments` first")
+        return 1
+    by_market = candidates_from_instruments(json.loads(snaps[-1].read_text()))
+    vault = DataVault(args.data_dir)
+    market = args.market.upper()
+    missing = {s: i for s, i in by_market[market].items() if not vault.snapshots(s)}
+    found = resolve_by_isin(missing, market)
+    path = out / f"{market.lower()}-candidates.json"
+    current = json.loads(path.read_text()) if path.exists() else sorted(by_market[market])
+    fixed = [found.get(s) or s for s in current]
+    path.write_text(json.dumps(list(dict.fromkeys(fixed))))
+    (out / f"{market.lower()}-resolved.json").write_text(json.dumps(found, indent=1))
+    hits = {k: v for k, v in found.items() if v and v != k}
+    print(f"{market}: {len(missing)} without data; re-mapped {len(hits)} by ISIN, "
+          f"{sum(v is None for v in found.values())} not found on Yahoo")
+    for k, v in sorted(hits.items()):
+        print(f"  {k} -> {v}")
+    print(f"updated {path}; fetch the new symbols with silo fetch --symbols-file")
     return 0
 
 
@@ -750,7 +779,9 @@ def main(argv: list[str] | None = None) -> int:
     u.set_defaults(func=cmd_universe)
 
     po = sub.add_parser("pool", help="list every UK and US share on Trading 212 Practice as Yahoo candidates")
-    po.add_argument("action", choices=["instruments"])
+    po.add_argument("action", choices=["instruments", "resolve"],
+                    help="instruments: list shares; resolve: re-map ones Yahoo had no data for, by ISIN")
+    po.add_argument("--market", choices=["uk", "us"], default="uk", help="resolve: which market")
     po.add_argument("--out", default="pool", help="folder for the dated snapshot and candidate lists")
     po.set_defaults(func=cmd_pool)
 

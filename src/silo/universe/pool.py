@@ -37,6 +37,14 @@ _UK = re.compile(r"^(?P<base>.+)l_EQ$")
 _NAME_NOISE = re.compile(r"\b(plc|inc|corp|corporation|ltd|limited|group|holdings?|co|company|sa|nv|ag|adr|ads|the)\b|[^a-z0-9 ]")
 
 
+# Trading 212 codes that differ from Yahoo's, confirmed by hand. `silo pool
+# resolve` finds more by looking up the ISIN on Yahoo.
+YAHOO_OVERRIDES = {
+    "BT.L": "BT-A.L",  # BT Group
+    "ASOS.L": "ASC.L",  # ASOS
+}
+
+
 def yahoo_symbol(instrument: dict) -> tuple[str, str] | None:
     """(market, Yahoo ticker) for a Trading 212 share, or None if out of scope."""
     if str(instrument.get("type", "")).upper() != "STOCK":
@@ -46,7 +54,8 @@ def yahoo_symbol(instrument: dict) -> tuple[str, str] | None:
     if (m := _US.match(ticker)) and currency == "USD":
         return "US", m["base"].replace("_", "-").replace(".", "-").upper()
     if (m := _UK.match(ticker)) and currency in {"GBX", "GBP"}:
-        return "UK", m["base"].replace("_", "-").replace(".", "-").upper() + ".L"
+        sym = m["base"].replace("_", "-").replace(".", "-").upper() + ".L"
+        return "UK", YAHOO_OVERRIDES.get(sym, sym)
     return None
 
 
@@ -167,6 +176,31 @@ def rank_pool(
         table.at[symbol, "picked"] = True
         picked += 1
     return table
+
+
+def resolve_by_isin(missing: dict[str, dict], market: str) -> dict[str, str | None]:  # pragma: no cover
+    """For candidates Yahoo had no data for, look the ISIN up on Yahoo.
+
+    Returns ``{trading212_guess: yahoo_symbol or None}``. Only a hit on the
+    same market (``.L`` for the UK, no suffix for the US) is accepted.
+    """
+    import yfinance as yf
+
+    out: dict[str, str | None] = {}
+    for guess, inst in missing.items():
+        isin = inst.get("isin")
+        found = None
+        try:
+            quotes = yf.Search(isin, max_results=5).quotes if isin else []
+        except Exception:  # noqa: BLE001
+            quotes = []
+        for q in quotes:
+            sym = str(q.get("symbol", ""))
+            if (market == "UK" and sym.endswith(".L")) or (market == "US" and "." not in sym):
+                found = sym
+                break
+        out[guess] = found
+    return out
 
 
 def sectors_today(symbols: list[str]) -> dict[str, str]:  # pragma: no cover - needs network
