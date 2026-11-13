@@ -49,14 +49,15 @@ def screen(
     min_history: int = 252,
     min_value_traded: float = 5e6,
     min_price: float = 1.0,
-    vol_band: tuple[float, float] = (0.20, 0.45),
+    vol_band: tuple[float, float] = (0.0, 0.60),
     max_drawdown: float = -0.5,
 ) -> pd.DataFrame:
     """Score each symbol on liquidity, volatility and damage, using prices only.
 
     ``asof`` limits each table to bars public by then (point-in-time).
-    Volatility between 20% and 45% a year is "healthy": enough movement to
-    reward holding for weeks, not so much that one bad week dominates.
+    Volatility above 60% a year is too wild: one bad week would dominate.
+    (The earlier 20% to 45% band also threw out many strong momentum names,
+    so calm shares now pass and the floor is 0 by default.)
     """
     rows = {}
     for symbol, df in tables.items():

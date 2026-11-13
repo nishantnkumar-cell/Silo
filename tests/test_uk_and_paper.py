@@ -83,10 +83,12 @@ def test_holding_stats():
 def test_screen_flags_volatility_and_liquidity():
     syms, tables = uk_tables(n=3, n_days=400)
     calm = normalize_bars(synthetic_bars(n_days=400, seed=9, vol=0.003, start_price=2500), UK, pence=True)
-    tables["CALM.L"] = calm
+    wild = normalize_bars(synthetic_bars(n_days=400, seed=9, vol=0.06, start_price=2500), UK, pence=True)
+    tables["CALM.L"], tables["WILD.L"] = calm, wild
     out = screen(tables, min_value_traded=1e6)
-    assert not out.loc["CALM.L", "passes"]
-    assert "volatility" in out.loc["CALM.L", "reason"]
+    assert "volatility" not in str(out.loc["CALM.L", "reason"])  # calm names are no longer thrown out
+    assert not out.loc["WILD.L", "passes"]
+    assert "volatility" in out.loc["WILD.L", "reason"]
 
 
 def test_paper_book_is_forward_only_and_matches_backtest(tmp_path):
