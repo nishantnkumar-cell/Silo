@@ -121,7 +121,7 @@ class PaperBook:
         """
         cfg = self.config()
         state = self._load()
-        tables = {s: vault.get_bars(s) for s in cfg["symbols"]}
+        tables = vault.tables(cfg["symbols"])
         data = MarketData(tables)
         start_after = pd.Timestamp(cfg["start_after"])
         done = state["book"].last_date or start_after

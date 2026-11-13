@@ -18,6 +18,16 @@ class FutureDataError(LookupError):
     """Raised when code asks for data that was not yet public at the clock."""
 
 
+# Tables whose name starts with this are context (macro series, news events),
+# not tradable symbols: views serve them through :meth:`PointInTimeView.context`
+# with the same ``available_at`` filter, and the engine never trades them.
+CONTEXT_PREFIX = "ctx:"
+
+
+def is_context(name: str) -> bool:
+    return name.startswith(CONTEXT_PREFIX)
+
+
 class PreparedTables(Mapping):
     """Tables split once into data and an ``available_at`` array, for fast views."""
 
@@ -54,7 +64,22 @@ class PointInTimeView:
 
     @property
     def symbols(self) -> list[str]:
-        return list(self._t)
+        return [n for n in self._t if not is_context(n)]
+
+    def context_names(self, prefix: str = CONTEXT_PREFIX) -> list[str]:
+        return [n for n in self._t if n.startswith(prefix)]
+
+    def context(self, name: str, lookback: int | None = None) -> pd.DataFrame:
+        """Rows of a context table public at the clock, newest last, with ``available_at``.
+
+        A missing table gives an empty frame, so agents degrade to "no
+        information" instead of failing when a source was never fetched.
+        """
+        if name not in self._t:
+            return pd.DataFrame()
+        cut = self._t.cut(name, self.clock)
+        lo = 0 if lookback is None else max(0, cut - lookback)
+        return self._t[name].iloc[lo:cut].copy()  # keeps available_at: events need their timestamps
 
     def bars(self, symbol: str, lookback: int | None = None) -> pd.DataFrame:
         """Rows of ``symbol`` public at the clock (a copy), newest last."""

@@ -30,6 +30,7 @@ import numpy as np
 import pandas as pd
 
 from silo.engine import MarketData, Session
+from silo.firewall import is_context
 from silo.lab.regimes import regime_table
 from silo.metrics import summarize
 from silo.strategies import REGISTRY
@@ -90,7 +91,7 @@ def run_one(name, symbols, data: MarketData, start, end, costs, constraints, pro
 
 def run_league_backtest(names, symbols, tables, start=None, end=None, costs=None, constraints=None,
                         progress=print) -> tuple[list[Entry], Entry]:
-    data = MarketData({s: tables[s] for s in symbols})
+    data = MarketData({s: tables[s] for s in symbols} | {k: v for k, v in tables.items() if is_context(k)})
     bench = run_one("buy_and_hold", symbols, data, start, end, costs, None, progress)
     entries = []
     for n in names:
