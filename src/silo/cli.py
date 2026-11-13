@@ -195,6 +195,16 @@ def cmd_paper(args) -> int:
 
         print(reconcile(book, Trading212Demo()).to_string())
         return 0
+    if args.action == "t212-fills":
+        from silo.brokers.trading212 import Trading212Demo
+        from silo.fills import collect_fills, format_gap, gap_report, save_gap
+
+        new = collect_fills(book, Trading212Demo())
+        print(f"{len(new)} new Practice fill(s) logged")
+        gap, summary = gap_report(book)
+        save_gap(book, gap, summary)
+        print(format_gap(gap, summary, book.config()["currency"]))
+        return 0
     if args.action == "new":
         symbols = args.symbols or json.loads(Path(args.symbols_file).read_text())
         rules = _rules(args, symbols)
@@ -213,8 +223,16 @@ def cmd_paper(args) -> int:
         print(f"processed {len(events)} new trading day(s)")
         if args.mirror == "t212":
             from silo.brokers.trading212 import Trading212Demo
+            from silo.fills import collect_fills, gap_report, save_gap
             from silo.paper import mirror_latest_decision
 
+            try:
+                got = collect_fills(book, Trading212Demo())
+                save_gap(book, *gap_report(book))
+                if got:
+                    print(f"Trading 212 Practice: {len(got)} new fill(s) logged; see `silo paper t212-fills {book.name}`")
+            except Exception as exc:  # noqa: BLE001 - fills are a report; never block mirroring
+                print(f"Trading 212 Practice fills not collected: {exc}")
             sent = mirror_latest_decision(book, Trading212Demo(), fractional=args.fractional)
             print(f"Trading 212 Practice: {len(sent)} order(s) sent" if sent else
                   "Trading 212 Practice: no new rebalance to mirror")
@@ -317,9 +335,20 @@ def cmd_daily(args) -> int:
         from silo.brokers.trading212 import Trading212Demo
         from silo.paper import PaperBook, mirror_latest_decision
 
+        mbook = PaperBook(args.mirror, args.paper_dir)
         try:
-            sent = mirror_latest_decision(PaperBook(args.mirror, args.paper_dir), Trading212Demo(),
-                                          fractional=args.fractional)
+            from silo.fills import collect_fills, gap_report, save_gap
+
+            got = collect_fills(mbook, Trading212Demo())
+            gap, summary = gap_report(mbook)
+            save_gap(mbook, gap, summary)
+            if got:
+                print(f"\nTrading 212 Practice ({args.mirror}): {len(got)} new fill(s) logged; "
+                      f"median gap to simulator {summary.get('median_slippage_bps', float('nan')):+.1f} bp")
+        except Exception as exc:  # noqa: BLE001 - fills are a report; never block mirroring
+            print(f"\nTrading 212 Practice fills not collected: {exc}")
+        try:
+            sent = mirror_latest_decision(mbook, Trading212Demo(), fractional=args.fractional)
             print(f"\nTrading 212 Practice ({args.mirror}): {len(sent)} order(s) sent" if sent else
                   f"\nTrading 212 Practice ({args.mirror}): no new rebalance to mirror")
             for e in sent:
@@ -376,7 +405,7 @@ def main(argv: list[str] | None = None) -> int:
     u.set_defaults(func=cmd_universe)
 
     pp = sub.add_parser("paper", help="forward paper trading on the simulator")
-    pp.add_argument("action", choices=["new", "run", "status", "t212-map", "t212-check"])
+    pp.add_argument("action", choices=["new", "run", "status", "t212-map", "t212-check", "t212-fills"])
     pp.add_argument("name")
     pp.add_argument("--paper-dir", default="paper")
     pp.add_argument("--strategy", choices=STUDY_STRATEGIES, default="uk_trend")

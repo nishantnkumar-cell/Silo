@@ -387,6 +387,8 @@ def book_page(paper_dir: Path, name: str, token: str, check: dict | None = None)
                        "<thead><tr><th>Symbol</th><th class='l'>Ticker</th><th>Simulator</th><th>Practice</th><th>Gap</th>"
                        f"<th>Practice shares</th></tr></thead><tbody>{crow}</tbody></table></div>")
 
+    mirror += _fill_gap_html(book)
+
     rules = cfg.get("constraints") or {}
     rules_txt = ", ".join(f"{k.replace('_', ' ')}: {_e(v)}" for k, v in rules.items() if not isinstance(v, dict))
     metrics_line = ""
@@ -410,6 +412,46 @@ def book_page(paper_dir: Path, name: str, token: str, check: dict | None = None)
 <p class="muted">Symbols: {_e(' '.join(cfg['symbols']))}</p>
 <p class="muted">Rules: {rules_txt or 'default'}</p>
 <p class="muted">Books are changed only from the command line; this page never edits them.</p>""")
+
+
+def _fill_gap_html(book) -> str:
+    """Practice fills beside SimBroker's, from the logs only (no broker call)."""
+    if not any(e.get("kind") == "fill" for e in read_jsonl(book.dir / "mirror.jsonl")):
+        return ("<h3>Practice fills against the simulator</h3><p class='muted'>No Practice fills logged yet. "
+                f"<code>silo paper t212-fills {_e(book.name)}</code> collects them once orders have filled.</p>")
+    from silo.fills import gap_report
+
+    try:
+        gap, summary = gap_report(book)
+    except Exception as exc:  # noqa: BLE001 - show, never crash the page
+        return f"<p class='msg err' role='alert'>Fill comparison failed: {_e(exc)}</p>"
+
+    def num(v, fmt):
+        return "" if v is None or v != v else format(v, fmt)
+
+    rows = "".join(
+        f"<tr><td>{_date(r.get('decision_date'))}</td><td class='l'>{_e(r['symbol'])}</td><td class='l'>{_e(r['side'])}</td>"
+        f"<td>{num(r.get('practice_price'), ',.4f')}</td><td>{num(r.get('sim_price'), ',.4f')}</td>"
+        f"<td class='{'bad' if (r.get('slippage_bps') or 0) > 25 else ''}'>{num(r.get('slippage_bps'), '+.1f')}</td>"
+        f"<td>{num(r.get('practice_fee_bps'), '.1f')}</td><td>{num(r.get('sim_fee_bps'), '.1f')}</td>"
+        f"<td>{num(r.get('practice_delay_h'), '.1f')}</td></tr>"
+        for r in reversed(gap.to_dict("records"))
+    )
+    lines = [f"{summary['fills']} Practice fill(s), {summary['paired']} paired with a simulator fill."]
+    if summary.get("paired"):
+        lines.append(f"Median price gap {summary['median_slippage_bps']:+.1f} bp (positive means the Practice "
+                     f"account did worse). From the open: Practice {summary['median_practice_vs_open_bps']:+.1f} bp, "
+                     f"simulator assumes {summary['sim_vs_open_bps']:+.1f} bp.")
+    if "suggested_slippage_bps" in summary:
+        lines.append(f"Slippage setting that would match: {summary['suggested_slippage_bps']} bp (not applied).")
+    return ("<h3>Practice fills against the simulator</h3>"
+            + "".join(f"<p class='muted'>{_e(x)}</p>" for x in lines)
+            + "<div class='scroll'><table><thead><tr><th>Decision</th><th class='l'>Symbol</th><th class='l'>Side</th>"
+              "<th>Practice price</th><th>Simulator price</th><th>Gap (bp)</th><th>Practice fees (bp)</th>"
+              "<th>Simulator fees (bp)</th><th>Hours to fill</th></tr></thead>"
+              f"<tbody>{rows}</tbody></table></div>"
+            + "<p class='muted' style='font-size:13px'>Practice fills are Trading 212's simulation, not real-money "
+              "executions. Silo's simulator stays the book's record.</p>")
 
 
 def reports_page(reports_dir: Path) -> str:
