@@ -14,6 +14,9 @@ Silo is a research-only trading lab. These rules are absolute:
 
 - Silo is for UK position trading (weeks to months). Keep `Constraints.position_trading()`
   as the default for books and CLI runs; no intraday strategies.
+- One exception: a separate daily-bar book for liquid silver ETFs and major crypto
+  (`silo.universe.daily`, `--style daily`, `Constraints.daily_trading()`). It decides on daily
+  closes only (never intraday), keeps the liquidity rules on, and never applies to UK shares.
 - Liquidity rules (`silo.liquidity.Liquidity`) stay on for position-trading books: no penny stocks
   (under £1), no names trading under £5m a day, positions small enough to sell in two days.
 - Prices stay split-adjusted, never dividend-adjusted; dividends are paid as cash.

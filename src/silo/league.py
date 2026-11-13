@@ -26,6 +26,10 @@ PARAMS = {"random": {"decide_prob": 0.25, "exposure": 0.9}, "momentum": {"top_k"
           "macro_tilt": {"top_k": 15}, "news_mom": {"top_k": 15}}
 AI_CONTESTANTS = ["desk", "panel", "silo_agent", "panel_macro", "desk_macro", "panel_news", "desk_news",
                   "panel_full", "desk_full"]
+# Daily-bar books (silver, crypto): rules that act on daily signals, plus a random control
+# that rebalances about every ten days.
+DAILY_CONTESTANTS = ["tsmom", "donchian", "rsi2", "bollinger", "random"]
+DAILY_PARAMS = {"random": {"decide_prob": 0.1, "exposure": 0.9}}
 
 
 def book_names(paper_dir: str | Path) -> list[str]:
@@ -36,13 +40,15 @@ def book_names(paper_dir: str | Path) -> list[str]:
 
 
 def create_league(symbols, vault: DataVault, paper_dir="paper", prefix="league", with_ai=False,
-                  cash=100_000.0, constraints=None, costs=None) -> list[dict]:
+                  cash=100_000.0, constraints=None, costs=None, daily=False) -> list[dict]:
     made = []
-    for strat in RULE_CONTESTANTS + (AI_CONTESTANTS if with_ai else []):
+    contestants = DAILY_CONTESTANTS if daily else RULE_CONTESTANTS + (AI_CONTESTANTS if with_ai else [])
+    params = DAILY_PARAMS if daily else PARAMS
+    for strat in contestants:
         book = PaperBook(f"{prefix}-{strat}", paper_dir)
         if book.exists:
             continue
-        made.append(book.create(strat, symbols, vault, PARAMS.get(strat, {}), cash, constraints, costs))
+        made.append(book.create(strat, symbols, vault, params.get(strat, {}), cash, constraints, costs))
     return made
 
 

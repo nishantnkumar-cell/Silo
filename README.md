@@ -140,6 +140,36 @@ pytest
 
 `silo fetch --source stooq` is a fallback when Yahoo rate-limits.
 
+## Daily book: silver ETFs and crypto
+
+A separate book for **daily-bar** trading of a couple of silver ETFs and the two largest coins. It
+decides at each daily close and fills at the next open, so it is daily, never intraday. It never mixes
+with the UK position-trading books, which keep their weekly rules.
+
+| Part | File | What it does |
+|---|---|---|
+| Universe | `src/silo/universe/daily.py` | Silver: `SLV`, `SIVR`. Crypto: `BTC-USD`, `ETH-USD`. Only very liquid names. |
+| Crypto market | `src/silo/markets.py` | Trades every day; a UTC day's bar is final at 00:05 UTC the next day. Yahoo's dollar volume is stored as coins. Sharpe and CAGR use 365 days a year for crypto. |
+| Partial bars | `data/sources.py`, `paper.py` | A bar from a session still trading (US hours, today's crypto day) is never stored, and a paper book only steps a day once every bar in it is final. |
+| Costs | `src/silo/broker.py` | `CostModel.crypto()`: 0.25% exchange fee each way, 10bp spread, 10bp slippage (about 0.8% a round trip). `CostModel.us_from_uk()`: US ETF costs plus a 0.15% FX fee each way. `--cost-scale 2` doubles every cost to check a result survives. |
+| Rules | `src/silo/constraints.py` | `Constraints.daily_trading()`: decide daily, hold at least one day, at most 50% in one name, liquidity on. Crypto needs $1bn a day of reported volume and each fill may take only 1% of it; US ETFs need $5 a share and $20m a day. |
+| Strategy | `tsmom` in `strategies/classic.py` | Time-series momentum with volatility targeting; trades only when a signal flips or a size drifts 25%. Studied alongside `donchian`, `rsi2`, `bollinger` and `sma_cross`. |
+
+```bash
+silo fetch --universe silver
+silo fetch --universe crypto
+silo lab --universe silver --style daily --out reports/silver          # every daily strategy
+silo lab --universe crypto --style daily --out reports/crypto
+silo lab --universe crypto --style daily --cost-scale 2 --out reports/crypto-2x   # double costs
+silo league new --universe crypto --style daily --prefix crypto        # forward paper books
+silo league new --universe silver --style daily --prefix silver
+silo daily                                                             # advances every book
+```
+
+Notes: UK retail investors generally cannot buy US-domiciled ETFs such as SLV (no UK KID); the
+London-listed physical silver ETCs follow the same metal, and SLV's longer history stands in for them.
+Trading 212 Invest has no spot crypto, so the crypto book lives on the simulator only.
+
 ## Phase 3 and 4: AI contestants, Silo's own agent, and the league
 
 All AI strategies run on a **free local model** through [Ollama](https://ollama.com), so nothing

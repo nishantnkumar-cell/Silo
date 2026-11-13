@@ -7,6 +7,7 @@ from silo.strategies.classic import (
     Rsi2MeanReversion,
     SmaCross,
     TrendQuality,
+    TrendVolTarget,
     VolTarget,
 )
 from silo.strategies.crossasset import MacroTilt, SectorMomentum
@@ -26,6 +27,7 @@ REGISTRY = {
     "news_mom": NewsMomentum,
     "results_drift": ResultsDrift,
     "director_buys": DirectorBuys,
+    "tsmom": TrendVolTarget,
     "random": RandomEntry,
 }
 
@@ -48,5 +50,6 @@ __all__ = [
     "Momentum12_1",
     "VolTarget",
     "TrendQuality",
+    "TrendVolTarget",
     "RandomEntry",
 ]
