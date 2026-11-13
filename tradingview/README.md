@@ -1,77 +1,74 @@
 # Silo Core Zones: TradingView indicator
 
 > Research only. A chart indicator, not a trading bot: it places no orders and connects to no
-> broker. Silo's backtests of these rules (`core_zones`, `core_trail`) have so far lost to
-> buy-and-hold and to random entries, so treat the scores as a way to read charts, not as signals.
+> broker. Silo's backtests of the earlier zone rules lost to buy-and-hold and to random entries,
+> so treat the zones as a way to read charts, not as signals.
 
-`core_zones.pine` draws supply and demand zones the way the Core Strategy course defines them,
-scores each one out of 10, and (optionally) shows the entry, stop and targets for the best setup.
-It is a Pine Script v6 port of Silo's Python rules in `src/silo/strategies/core_zones.py` and
-`docs/core-strategy-rulebook.md` (branch `league-backtest`).
+`core_zones.pine` draws the **immediate demand zone below price and the immediate supply zone above
+it**, the way the Core Strategy manual's zoning process finds them, refines each zone's proximal
+line on a lower time frame, and scores each zone out of 10. The rules were re-derived from the
+manual itself (OCR text in the project Library: `silo-reports/research/ocr/`); slide numbers are
+given in the script's header.
 
 ## Add it to TradingView
 
-1. Open a chart on tradingview.com (a free account works) and set it to the **daily** time frame.
+1. Open a chart on tradingview.com and set it to the **daily** time frame.
 2. Click **Pine Editor** at the bottom of the screen.
-3. Open the menu next to the script name and choose **Create new > Indicator**. Delete the
-   sample code.
-4. Paste the whole of `core_zones.pine` and click **Save** (name it "Silo Core Zones").
-5. Click **Add to chart**.
-6. To change settings, click the gear icon next to the indicator's name on the chart.
+3. If you added the earlier version, open it; otherwise choose **Create new > Indicator**.
+   Select all the code and replace it with the whole of `core_zones.pine`.
+4. Click **Save**, then **Add to chart** (or **Update on chart**).
+5. Settings: the gear icon next to the indicator's name.
 
-If TradingView shows a compile error, copy the red message and send it back; the script was
-checked against Silo's Python zone finder but not compiled inside TradingView.
+If TradingView shows a compile error, copy the red message and send it back; the script has not
+been compiled inside TradingView yet.
 
-## What you see
+## How a zone is found (from the manual)
 
-* **Green boxes**: demand zones. **Red boxes**: supply zones. Darker means a higher score
-  (8.5+ darkest, 7-8 medium, below 7 faint). Violated zones (a close beyond the far edge)
-  disappear.
-* **Box text**: formation (DBR, RBR, RBD, DBD), score out of 10, and "in zone" when price is
-  inside it now. The second line is the breakdown: **S**trength 0-2, **T**ime 0-1,
-  **F**reshness 0-2, **Tr**end 0-2, **C**urve 0-1, **P**rofit zone 0-2.
-* **Dashed boxes**: the nearest monthly supply above price and demand below it (the edges of
-  the "curve"). These show the bigger zones even when no daily supply is left.
-* **Why there may be no red boxes**: a supply zone is deleted once a daily close goes above its
-  top (distal) line, and only the last 260 daily bars are searched. A share that has rallied for
-  a year has broken every supply zone above it, so none are drawn; the table's "Zones drawn"
-  row says so. Raise "Keep zones from the last N bars" to look further back.
-* **Grey step line**: the weekly trend's controlling swing (the low that ends an uptrend if
-  price closes below it).
-* **Table, top right**: weekly trend, where price sits in the monthly curve, and the best long
-  (and short, if turned on).
-* **Trade plan** for the best long setup that the decision matrix allows, scores at least the
-  minimum (7 by default) and has a target at least **1:4**:
-  * blue **Entry** at the proximal line (8.5+: limit order there; 7-8: wait for price to close
-    back out of the zone first),
-  * red **Stop** beyond the distal line by 10% of the daily ATR,
-  * orange dashed **Sell half** at 1:2, then trail the stop under each new demand zone that
-    forms,
-  * green **Target** at 75% of the way to the next supply zone (or the minimum 1:4 if there is
-    no supply overhead).
+| Step | Manual | Indicator |
+|---|---|---|
+| Candles | Leg candles close outside the range of the preceding candle and look bullish or bearish; base candles are neutral and close inside it; a gap counts as part of the candle (slides 79-81, 50) | leg = closes beyond the previous candle's high (low) **and** in the top (bottom) 40% of its range; everything else is a base candle |
+| Zone | Leg-in, base, leg-out; a rally out = demand, a drop out = supply (89-91) | same, 1 to 6 base candles |
+| Explosive move | Leg candles with consecutive higher (lower) closes that make a **new high (low)**; a big candle that fails to make a new high does not count (72-77) | the move out must take out the last swing high (low) before the base |
+| Lines | Base isolation; proximal at the highest (lowest) **body** in the base, the preferred setting; distal at the extreme of the whole DBR/RBD, or of base and move out for RBR/DBD (96-115) | same |
+| Which zones | Start at current price and look down (up) and left until you reach the explosive move (140-145) | only the **nearest** live demand below and supply above price are drawn |
+| Refining | The Refining Time Frame refines the proximal and distal lines (312). The manual lists it as optional and leaves the method to the advanced course | on the lower time frame (60 min by default), find the turning point inside the zone, take the small base right before the first lower-time-frame leg out of it, and move the proximal line to that base's body. The distal line is the same price on any time frame. The dashed outline shows the unrefined daily zone |
+| Violation | Price crossing the distal line disqualifies the zone (127) | any trade beyond the distal line (or only a close, in settings) |
+| Score | Strength 2, time 1, freshness 2, trend 2 (weekly), curve 1 (monthly), profit zone 2 | same; the profit zone uses the immediate opposing zone |
+
+Lower-time-frame refining needs intraday data for the days that formed the zone. TradingView
+keeps a limited amount of hourly history, so an old zone may say "not refined" and keep its daily
+lines.
+
+If there is no daily supply left above price (a share at its highs), the nearest monthly supply is
+shown as a dashed box instead, and the same for demand.
 
 ## Alerts
 
-To be told when price trades into the planned zone: right-click the chart, **Add alert**,
-pick "Silo Core Zones" as the condition and **Any alert() function call**. The alert fires once
-per daily close while price is in the zone.
+Right-click the chart, **Add alert**, choose "Silo Core Zones" and **Any alert() function call**.
+It fires once per daily close while price is inside the immediate demand or supply zone.
 
-## How it maps to Silo's rules
+## Trade plan (off by default)
 
-| Rule | Indicator |
-|---|---|
-| Base candle: body at most half the candle's range, gaps count toward the body | same (`f_kind`) |
-| Zone: leg-in, 1-10 base candles, leg-out making a new high (low) | same (`f_detect`) |
-| Proximal at the base's highest (lowest) body; distal at the extreme, with the leg-in for DBR/RBD | same |
-| Strength, time, freshness | same; the current visit does not count against freshness |
-| Trend on weekly bars, controlling swing | same rules, **completed weeks only** (Silo includes the current partial week) |
-| Curve on monthly bars, nearest quality zones distal to distal | same, completed months only; zones are picked around the **last monthly close** rather than today's price |
-| Profit zone, decision matrix, 8.5 / 7 thresholds | same |
-| Stop, 75% target | same, but the plan also requires the user's minimum **1:4** (Silo's backtest used 1:3) |
-| Sell half at 1:2, trail the rest | shown as a plan; the indicator does not track an open trade |
-| Shorts at supply | optional (off by default); Silo itself is long-only |
+Turn on "Show stop, entry and targets" to draw, at the immediate demand: entry at the proximal
+line, stop 10% of daily ATR beyond the distal line (slide 425), sell half at 1:2 and then trail,
+and a target at 75% of the way to the immediate supply. It is only drawn when that target is at
+least 1:4 and the decision matrix allows a trade.
 
-A bar-by-bar Python model of the indicator's zone finder was checked against Silo's
-`find_zones` on 200 random price series and found the same zones, lines, freshness and strength
-every time. TradingView's built-in swing function may treat equal highs slightly differently
-from Silo's, which can change a strength or trend score at the margin.
+## What Silo's core strategy would change to match
+
+Once the chart looks right, `silo.strategies.core_zones` would need these changes:
+
+1. **Candle test:** a leg candle must close beyond the previous candle's high or low. Silo
+   currently only checks that the body is more than half the range.
+2. **Explosive test:** the move out must break the last swing high (low) before the base. Silo
+   only checks the leg-in and base highs.
+3. **Breakout:** the move out must cross past the previous opposing *zone*. Silo uses a swing
+   high or low.
+4. **Violation:** any trade through the distal line, optionally a close. Silo uses a close only,
+   and does not check during the move out.
+5. **Immediate zone only:** trade only the nearest live demand below price, and use the nearest
+   supply above as the profit zone. Silo scores every demand zone below price.
+6. **Refining:** Silo has daily bars only. Refining needs hourly bars for at least the past few
+   years in the data vault, from a source with point-in-time timestamps, with `available_at` on
+   every row. Without them Silo would trade the unrefined daily zone.
+7. **Base length:** at most 6 base candles. Silo allows 10.
