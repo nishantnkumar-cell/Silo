@@ -136,6 +136,55 @@ class DataVault:
         spread = wide.max(axis=1) - wide.min(axis=1)
         return wide[spread > tol * wide.abs().max(axis=1).replace(0, np.nan)]
 
+    # -- context tables: macro series, news events (names start with "ctx:") --
+
+    def _ctx_dir(self, name: str) -> Path:
+        return self.root / "context" / name.removeprefix("ctx:").replace(":", "__").replace("/", "_")
+
+    def put_context(self, name: str, df: pd.DataFrame, fetched_at: datetime | None = None) -> pd.DataFrame:
+        """Store a context table as a new dated snapshot (never overwritten).
+
+        ``df`` needs an ``available_at`` UTC column. Rows are keyed by the
+        index; on reads the newest snapshot wins for a repeated key.
+        """
+        if not name.startswith("ctx:"):
+            raise ValueError(f"context table names start with 'ctx:' (got {name!r})")
+        if "available_at" not in df.columns:
+            raise ValueError(f"context table {name!r} needs an available_at column")
+        stamp = (fetched_at or datetime.now(timezone.utc)).strftime("%Y%m%dT%H%M%S%fZ")
+        d = self._ctx_dir(name)
+        d.mkdir(parents=True, exist_ok=True)
+        path = d / f"{stamp}.parquet"
+        if path.exists():
+            raise FileExistsError(f"snapshot {path} already exists; snapshots are never overwritten")
+        df.to_parquet(path)
+        (d / "name.txt").write_text(name)
+        return self.get_context(name)
+
+    def get_context(self, name: str) -> pd.DataFrame:
+        d = self._ctx_dir(name)
+        snaps = sorted(d.glob("*.parquet")) if d.exists() else []
+        if not snaps:
+            raise KeyError(f"no cached context table {name}")
+        merged = pd.concat([pd.read_parquet(p) for p in snaps])
+        merged = merged[~merged.index.duplicated(keep="last")]
+        avail = pd.to_datetime(merged["available_at"], utc=True)
+        merged = merged.assign(available_at=avail)
+        return merged.iloc[np.argsort(avail.to_numpy(), kind="stable")]
+
+    def context_names(self) -> list[str]:
+        root = self.root / "context"
+        if not root.exists():
+            return []
+        return sorted((p / "name.txt").read_text() for p in root.iterdir() if (p / "name.txt").exists())
+
+    def tables(self, symbols: list[str], context: bool = True) -> dict[str, pd.DataFrame]:
+        """Bars for ``symbols`` plus every cached context table (macro, news)."""
+        out = {s: self.get_bars(s) for s in symbols}
+        if context:
+            out.update({n: self.get_context(n) for n in self.context_names()})
+        return out
+
     def symbols(self) -> list[str]:
         bars = self.root / "bars"
         names = {p.name for p in bars.iterdir() if p.is_dir()} | {p.stem for p in bars.glob("*.parquet")}

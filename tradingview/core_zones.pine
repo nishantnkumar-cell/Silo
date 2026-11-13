@@ -1,0 +1,478 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// Silo Core Zones: supply and demand zones scored out of 10 (research only, not financial advice).
+//
+// A chart indicator, not a trading bot. It mirrors Silo's Python rules in
+// src/silo/strategies/core_zones.py and docs/core-strategy-rulebook.md:
+//   zones   : leg-in, 1+ base candles (body <= half the range, gaps count), leg-out that makes a new high/low
+//   lines   : proximal at the base's highest body (demand) / lowest body (supply);
+//             distal at the formation's extreme, including the leg-in for reversals (DBR, RBD)
+//   score   : strength 2 + time 1 + freshness 2 + trend 2 (weekly) + curve 1 (monthly) + profit zone 2 = 10
+//   matrix  : curve x trend decision table; 8.5+ enter at proximal, 7-8 wait for confirmation, < 7 no trade
+//   plan    : stop = distal -/+ 10% of daily ATR; target 75% of the way to the next opposing zone;
+//             plan shown only if the target is at least the minimum reward:risk (default 1:4);
+//             sell half at 1:2, then trail the stop under each new demand zone (supply zone for shorts).
+// Use it on a DAILY chart: weekly bars give the trend, monthly bars give the curve.
+
+//@version=6
+indicator("Silo Core Zones (research only)", shorttitle = "Core Zones", overlay = true,
+     max_boxes_count = 500, max_lines_count = 100, max_labels_count = 100, max_bars_back = 500)
+
+// ---------------------------------------------------------------- inputs
+grpZ = "Zones"
+maxBase    = input.int(10, "Max base candles", minval = 1, maxval = 10, group = grpZ,
+     tooltip = "Bases longer than this are not zones. Time score: 1-3 candles = 1, 4-6 = 0.5, more = 0.")
+baseBody   = input.float(0.5, "Base candle: body at most this share of its range", minval = 0.1, maxval = 0.9, step = 0.05, group = grpZ)
+lookback   = input.int(260, "Keep zones from the last N bars", minval = 50, maxval = 2000, group = grpZ)
+showDemand = input.bool(true, "Show demand zones", group = grpZ)
+showSupply = input.bool(true, "Show supply zones", group = grpZ)
+minShow    = input.float(0.0, "Only show zones scoring at least", minval = 0, maxval = 10, step = 0.5, group = grpZ)
+showParts  = input.bool(true, "Show the score breakdown on each zone", group = grpZ)
+extendBars = input.int(20, "Extend zones right by N bars", minval = 0, maxval = 200, group = grpZ)
+
+grpT = "Higher time frames"
+trendTf = input.timeframe("W", "Trend time frame", group = grpT)
+curveTf = input.timeframe("M", "Curve time frame", group = grpT)
+showCtrl = input.bool(true, "Plot the trend's controlling swing", group = grpT)
+
+grpP = "Trade plan (S.E.T.)"
+showPlan   = input.bool(true, "Show entry, stop and targets for the best setup", group = grpP)
+showShort  = input.bool(false, "Also plan shorts at supply", group = grpP,
+     tooltip = "Silo is long-only, so this is off by default. The manual trades both sides.")
+minScore   = input.float(7.0, "Minimum score to plan a trade", minval = 7, maxval = 10, step = 0.5, group = grpP)
+minRR      = input.float(4.0, "Minimum reward:risk (1:x)", minval = 1, maxval = 20, step = 0.5, group = grpP)
+halfRR     = input.float(2.0, "Sell half at reward:risk (1:x)", minval = 0.5, maxval = 10, step = 0.5, group = grpP)
+targetFrac = input.float(0.75, "Target: share of the way to the next opposing zone", minval = 0.25, maxval = 1, step = 0.05, group = grpP)
+stopAtr    = input.float(0.10, "Stop buffer beyond distal (x daily ATR 14)", minval = 0, maxval = 2, step = 0.05, group = grpP)
+chaseMax   = input.float(1.10, "Skip demand whose proximal is above price by more than (x)", minval = 1, maxval = 2, step = 0.05, group = grpP)
+
+grpC = "Colours"
+colDem = input.color(color.new(#26a69a, 0), "Demand", group = grpC)
+colSup = input.color(color.new(#ef5350, 0), "Supply", group = grpC)
+colEnt = input.color(color.new(#2962ff, 0), "Entry", group = grpC)
+colStp = input.color(color.new(#d50000, 0), "Stop", group = grpC)
+colHlf = input.color(color.new(#ff9800, 0), "Sell half", group = grpC)
+colTgt = input.color(color.new(#00c853, 0), "Target", group = grpC)
+
+// ---------------------------------------------------------------- zone type
+type Zone
+    bool   demand
+    string fm          // DBR, RBR (demand) or RBD, DBD (supply)
+    float  prox        // proximal line: entries go here
+    float  dist        // distal line: the stop goes beyond it
+    int    baseStart   // bar_index of the first base candle
+    int    nBase
+    float  extreme     // furthest point of the move out
+    float  refLevel    // highest high (lowest low) of leg-in and base: the move out must pass it
+    float  swingRef    // previous opposing swing, if above proximal (demand) / below (supply)
+    bool   moving = true   // still in the run of closes away from the zone
+    bool   valid  = false  // made a new high (demand) / low (supply)
+    float  pen    = 0.0    // deepest earlier return into the zone, 0..1 of its height
+    float  visit  = 0.0    // depth of the current visit (does not count against freshness)
+    bool   inZone = false
+
+method height(Zone z) =>
+    math.abs(z.prox - z.dist)
+
+// Strength 0-2: left by at least 2x the zone height, and/or broke the previous opposing swing.
+method strength(Zone z) =>
+    float h = z.height()
+    float mv = h > 0 ? math.abs(z.extreme - z.prox) / h : 0.0
+    bool bo = not na(z.swingRef) and (z.demand ? z.extreme > z.swingRef : z.extreme < z.swingRef)
+    (mv >= 2.0 ? 1.0 : 0.0) + (bo ? 1.0 : 0.0)
+
+// Time 0-1: 1-3 base candles = 1, 4-6 = 0.5, more = 0.
+method timeScore(Zone z) =>
+    z.nBase <= 3 ? 1.0 : z.nBase <= 6 ? 0.5 : 0.0
+
+// Freshness 0-2: untested = 2, tested up to half way = 1, deeper = 0.
+method fresh(Zone z) =>
+    z.pen <= 0 ? 2.0 : z.pen <= 0.5 ? 1.0 : 0.0
+
+// ---------------------------------------------------------------- candles
+// +1 rally leg, -1 drop leg, 0 base. A gap counts toward the body.
+f_kind(float bb) =>
+    float pc = nz(close[1], open)
+    bool useGap = math.abs(close - pc) > math.abs(close - open)
+    float st = useGap ? pc : open
+    float body = math.abs(close - st)
+    float hi = useGap ? math.max(high, pc) : high
+    float lo = useGap ? math.min(low, pc) : low
+    float rng = math.max(hi - lo, 1e-12)
+    int k = 0
+    if body > bb * rng
+        k := close > st ? 1 : close < st ? -1 : 0
+    k
+
+// ---------------------------------------------------------------- zone finder
+// Bar by bar version of find_zones() + _freshness(). Returns the live zones.
+f_detect(int mb, int keep, float bb) =>
+    var array<Zone>  zs  = array.new<Zone>()
+    var array<int>   phI = array.new<int>()
+    var array<float> phP = array.new<float>()
+    var array<int>   plI = array.new<int>()
+    var array<float> plP = array.new<float>()
+    int k = f_kind(bb)
+    float ph = ta.pivothigh(high, 2, 2)
+    float pl = ta.pivotlow(low, 2, 2)
+    if not na(ph)
+        phI.push(bar_index - 2)
+        phP.push(ph)
+        if phI.size() > 100
+            phI.shift()
+            phP.shift()
+    if not na(pl)
+        plI.push(bar_index - 2)
+        plP.push(pl)
+        if plI.size() > 100
+            plI.shift()
+            plP.shift()
+
+    // 1. update zones found earlier: move out, then freshness and violation
+    if zs.size() > 0
+        for i = zs.size() - 1 to 0
+            Zone z = zs.get(i)
+            bool drop = false
+            if z.moving
+                float dir = z.demand ? 1.0 : -1.0
+                if (close - close[1]) * dir > 0
+                    if z.demand
+                        z.extreme := math.max(z.extreme, high)
+                        z.dist := math.min(z.dist, low)
+                        z.valid := z.extreme > z.refLevel
+                    else
+                        z.extreme := math.min(z.extreme, low)
+                        z.dist := math.max(z.dist, high)
+                        z.valid := z.extreme < z.refLevel
+                else
+                    z.moving := false
+                    drop := not z.valid
+            if not z.moving and not drop
+                if z.demand
+                    if close < z.dist
+                        drop := true  // closed beyond the distal line: violated
+                    else if low <= z.prox
+                        z.visit := math.max(z.visit, (z.prox - low) / z.height())
+                        z.inZone := true
+                    else
+                        if z.inZone
+                            z.pen := math.max(z.pen, z.visit)
+                        z.visit := 0.0
+                        z.inZone := false
+                else
+                    if close > z.dist
+                        drop := true
+                    else if high >= z.prox
+                        z.visit := math.max(z.visit, (high - z.prox) / z.height())
+                        z.inZone := true
+                    else
+                        if z.inZone
+                            z.pen := math.max(z.pen, z.visit)
+                        z.visit := 0.0
+                        z.inZone := false
+            if z.baseStart < bar_index - keep
+                drop := true
+            if drop
+                zs.remove(i)
+
+    // 2. a new formation ends on this bar: leg-in, 1..mb base candles, leg-out (this bar)
+    if k != 0 and nz(k[1], 9) == 0
+        int nb = 0
+        while nb <= mb and bar_index - 1 - nb >= 0 and nz(k[1 + nb], 9) == 0
+            nb += 1
+        int li = 1 + nb  // offset of the leg-in candle
+        if nb >= 1 and nb <= mb and bar_index - li >= 0 and nz(k[li], 0) != 0
+            int legIn = k[li]
+            bool up = k > 0
+            float prox = up ? -1e300 : 1e300
+            for j = 1 to nb
+                prox := up ? math.max(prox, math.max(open[j], close[j])) : math.min(prox, math.min(open[j], close[j]))
+            int far = legIn != k ? li : nb  // reversals include the leg-in in the distal
+            float dist = up ? low : high
+            for j = 0 to far
+                dist := up ? math.min(dist, low[j]) : math.max(dist, high[j])
+            float refL = up ? -1e300 : 1e300
+            for j = 1 to li
+                refL := up ? math.max(refL, high[j]) : math.min(refL, low[j])
+            float sref = na
+            int cut = bar_index - li
+            if up and phI.size() > 0
+                for q = phI.size() - 1 to 0
+                    if phI.get(q) < cut
+                        sref := phP.get(q)
+                        break
+                if not na(sref) and sref <= prox
+                    sref := na
+            if not up and plI.size() > 0
+                for q = plI.size() - 1 to 0
+                    if plI.get(q) < cut
+                        sref := plP.get(q)
+                        break
+                if not na(sref) and sref >= prox
+                    sref := na
+            if math.abs(prox - dist) > 0
+                string fm = up ? (legIn < 0 ? "DBR" : "RBR") : (legIn > 0 ? "RBD" : "DBD")
+                float ext = up ? high : low
+                zs.push(Zone.new(up, fm, prox, dist, bar_index - nb, nb, ext, refL, sref,
+                     true, up ? ext > refL : ext < refL, 0.0, 0.0, false))
+        if zs.size() > 300
+            zs.shift()
+    zs
+
+// ---------------------------------------------------------------- weekly trend
+// Uptrend starts when price closes above the last swing high after a higher low; each new
+// break makes the latest swing low the controlling low; a close below it ends the trend.
+f_trend() =>
+    var int   state  = 0
+    var float ctrl   = na
+    var float lastHi = na
+    var float prevHi = na
+    var float lastLo = na
+    var float prevLo = na
+    float ph = ta.pivothigh(high, 2, 2)
+    float pl = ta.pivotlow(low, 2, 2)
+    if not na(ph)
+        prevHi := lastHi
+        lastHi := ph
+    if not na(pl)
+        prevLo := lastLo
+        lastLo := pl
+    if not na(lastHi) and not na(lastLo)
+        if state == 1 and close < ctrl
+            state := 0
+            ctrl := na
+        else if state == -1 and close > ctrl
+            state := 0
+            ctrl := na
+        if close > lastHi
+            if state == 1
+                ctrl := lastLo
+            else if not na(prevLo) and lastLo >= prevLo
+                state := 1
+                ctrl := lastLo
+        else if close < lastLo
+            if state == -1
+                ctrl := lastHi
+            else if not na(prevHi) and lastHi <= prevHi
+                state := -1
+                ctrl := lastHi
+    [state[1], ctrl[1]]  // completed bars only
+
+// ---------------------------------------------------------------- monthly curve
+// Range from the nearest quality (strength >= 1) demand below to supply above, distal to distal.
+// Falls back to the 10-year low/high. Also returns the nearest monthly supply above / demand below
+// (used for the profit zone when no daily opposing zone exists).
+f_curve(int mb, float bb) =>
+    array<Zone> zs = f_detect(mb, 120, bb)
+    float lo = na
+    float hi = na
+    float supA = na
+    float demB = na
+    bool below = false
+    bool above = false
+    for z in zs
+        if z.valid
+            if z.demand and z.prox <= close
+                if z.strength() >= 1
+                    below := true
+                    lo := na(lo) ? z.dist : math.max(lo, z.dist)
+                demB := na(demB) ? z.prox : math.max(demB, z.prox)
+            if not z.demand and z.prox >= close
+                if z.strength() >= 1
+                    above := true
+                    hi := na(hi) ? z.dist : math.min(hi, z.dist)
+                supA := na(supA) ? z.prox : math.min(supA, z.prox)
+    float mn = low
+    float mx = high
+    int n = math.min(bar_index, 119)
+    for j = 0 to n
+        mn := math.min(mn, low[j])
+        mx := math.max(mx, high[j])
+    bool enough = bar_index >= 23
+    if na(lo) or not enough
+        lo := mn
+    if na(hi) or not enough
+        hi := mx
+    bool known = below and above and enough
+    [lo[1], hi[1], known[1], supA[1], demB[1]]  // completed bars only
+
+// ---------------------------------------------------------------- scoring
+// Decision matrix (curve third x trend). 0 = no action, 1 = trade, 2 = trade only with 5:1.
+f_matrix(bool demand, float loc, int tdir) =>
+    int third = loc < 1.0 / 3 ? 0 : loc <= 2.0 / 3 ? 1 : 2
+    int d = 0
+    if demand
+        d := third == 0 ? (tdir < 0 ? 2 : 1) : third == 1 ? (tdir < 0 ? 0 : 1) : (tdir > 0 ? 2 : 0)
+    else
+        d := third == 2 ? (tdir > 0 ? 2 : 1) : third == 1 ? (tdir > 0 ? 0 : 1) : (tdir < 0 ? 2 : 0)
+    d
+
+f_score(Zone z, array<Zone> zs, float price, float buf, int tDir, float tCtrl, float cLo, float cHi, float hSup, float hDem) =>
+    bool d = z.demand
+    float st = z.strength()
+    float tm = z.timeScore()
+    float fr = z.fresh()
+    float trS = 0.0
+    if d
+        trS := tDir > 0 ? (na(tCtrl) or z.dist >= tCtrl * 0.98 ? 2.0 : 1.0) : tDir == 0 ? 1.0 : 0.0
+    else
+        trS := tDir < 0 ? (na(tCtrl) or z.dist <= tCtrl * 1.02 ? 2.0 : 1.0) : tDir == 0 ? 1.0 : 0.0
+    float loc = not na(cLo) and not na(cHi) and cHi > cLo ? (z.prox - cLo) / (cHi - cLo) : 0.5
+    float cvS = d ? (loc < 1.0 / 3 ? 1.0 : loc <= 2.0 / 3 ? 0.5 : 0.0) : (loc > 2.0 / 3 ? 1.0 : loc >= 1.0 / 3 ? 0.5 : 0.0)
+    float entry = z.prox
+    float stop = d ? z.dist - buf : z.dist + buf
+    float risk = math.abs(entry - stop)
+    float opp = na
+    for o in zs
+        if o.valid and o.demand != d
+            if d and o.prox > math.max(entry, price)
+                opp := na(opp) ? o.prox : math.min(opp, o.prox)
+            if not d and o.prox < math.min(entry, price)
+                opp := na(opp) ? o.prox : math.max(opp, o.prox)
+    bool fromHtf = false
+    if na(opp)
+        if d and not na(hSup) and hSup > math.max(entry, price)
+            opp := hSup
+            fromHtf := true
+        if not d and not na(hDem) and hDem < math.min(entry, price)
+            opp := hDem
+            fromHtf := true
+    float rr = na(opp) ? 99.0 : risk > 0 ? math.abs(opp - entry) / risk : 0.0
+    float pzS = rr >= 5 ? 2.0 : rr >= 3 ? 1.0 : 0.0
+    int dec = f_matrix(d, loc, tDir)
+    float score = st + tm + fr + trS + cvS + pzS
+    [score, st, tm, fr, trS, cvS, pzS, loc, stop, opp, rr, dec, fromHtf]
+
+f_num(float v) =>
+    str.tostring(v, "#.#")
+
+f_px(float v) =>
+    str.tostring(v, format.mintick)
+
+// ---------------------------------------------------------------- run
+array<Zone> zones = f_detect(maxBase, lookback, baseBody)
+float atr14 = ta.sma(ta.tr(true), 14)
+[tDirRaw, tCtrl] = request.security(syminfo.tickerid, trendTf, f_trend(), lookahead = barmerge.lookahead_on)
+[cLo, cHi, cKnown, hSup, hDem] = request.security(syminfo.tickerid, curveTf, f_curve(maxBase, baseBody), lookahead = barmerge.lookahead_on)
+int tDir = nz(tDirRaw, 0)
+
+plot(showCtrl ? tCtrl : na, "Controlling swing (trend time frame)", color = color.new(color.gray, 30),
+     style = plot.style_stepline, linewidth = 1)
+
+var array<box>   boxes  = array.new<box>()
+var array<line>  lines  = array.new<line>()
+var array<label> labels = array.new<label>()
+var table info = table.new(position.top_right, 2, 6, bgcolor = color.new(color.black, 85), border_width = 1)
+
+f_planLine(float y, color c, int x1, int x2, string ls) =>
+    line.new(x1, y, x2, y, color = c, width = 2, style = ls)
+
+if barstate.islast
+    for b in boxes
+        b.delete()
+    boxes.clear()
+    for l in lines
+        l.delete()
+    lines.clear()
+    for lb in labels
+        lb.delete()
+    labels.clear()
+
+    float buf = stopAtr * atr14
+    float price = close
+    Zone  bestL = na
+    float bestLs = -1.0
+    float bestLstop = na
+    float bestLopp = na
+    float bestLrr = na
+    Zone  bestS = na
+    float bestSs = -1.0
+    float bestSstop = na
+    float bestSopp = na
+    float bestSrr = na
+
+    for z in zones
+        if z.valid
+            [sc, st, tm, fr, trS, cvS, pzS, loc, stop, opp, rr, dec, fromHtf] = f_score(z, zones, price, buf, tDir, tCtrl, cLo, cHi, hSup, hDem)
+            bool show = (z.demand ? showDemand : showSupply) and sc >= minShow
+            if show
+                color zc = z.demand ? colDem : colSup
+                int tp = sc >= 8.5 ? 62 : sc >= 7 ? 76 : 88
+                string txt = z.fm + "  " + f_num(sc) + "/10" + (z.inZone ? "  in zone" : "")
+                if showParts
+                    txt += "\nS" + f_num(st) + " T" + f_num(tm) + " F" + f_num(fr) + " Tr" + f_num(trS) + " C" + f_num(cvS) + " P" + f_num(pzS)
+                boxes.push(box.new(z.baseStart, math.max(z.prox, z.dist), bar_index + extendBars, math.min(z.prox, z.dist),
+                     border_color = color.new(zc, 40), bgcolor = color.new(zc, tp), text = txt,
+                     text_size = size.small, text_color = color.new(zc, 0), text_halign = text.align_right,
+                     text_valign = text.align_center))
+            // plan candidates: decision matrix allows it, score high enough, target at least the minimum reward:risk
+            bool allowed = dec != 0 and (dec != 2 or rr >= 5) and sc >= minScore
+            float risk = math.abs(z.prox - stop)
+            if allowed and risk > 0 and not z.moving
+                float tgt = na(opp) ? (z.demand ? z.prox + minRR * risk : z.prox - minRR * risk) : z.prox + targetFrac * (opp - z.prox)
+                float rrT = math.abs(tgt - z.prox) / risk
+                if rrT >= minRR - 1e-9
+                    if z.demand and z.prox <= price * chaseMax and (sc > bestLs or (sc == bestLs and z.prox > bestL.prox))
+                        bestL := z
+                        bestLs := sc
+                        bestLstop := stop
+                        bestLopp := opp
+                        bestLrr := rrT
+                    if not z.demand and showShort and z.prox >= price / chaseMax and (sc > bestSs or (sc == bestSs and z.prox < bestS.prox))
+                        bestS := z
+                        bestSs := sc
+                        bestSstop := stop
+                        bestSopp := opp
+                        bestSrr := rrT
+
+    // draw the S.E.T. for the best long (and short) setup
+    if showPlan
+        for side = 0 to 1
+            Zone  z  = side == 0 ? bestL : bestS
+            if not na(z)
+                float sc  = side == 0 ? bestLs : bestSs
+                float stp = side == 0 ? bestLstop : bestSstop
+                float opp = side == 0 ? bestLopp : bestSopp
+                float rrT = side == 0 ? bestLrr : bestSrr
+                float sgn = z.demand ? 1.0 : -1.0
+                float risk = math.abs(z.prox - stp)
+                float half = z.prox + sgn * halfRR * risk
+                float tgt = z.prox + sgn * rrT * risk
+                int x1 = math.max(z.baseStart, bar_index - 30)
+                int x2 = bar_index + extendBars + 15
+                string how = sc >= 8.5 ? "limit at proximal" : "wait for confirmation (close back out of the zone)"
+                lines.push(f_planLine(z.prox, colEnt, x1, x2, line.style_solid))
+                lines.push(f_planLine(stp, colStp, x1, x2, line.style_solid))
+                lines.push(f_planLine(half, colHlf, x1, x2, line.style_dashed))
+                lines.push(f_planLine(tgt, colTgt, x1, x2, line.style_solid))
+                string side_ = z.demand ? "LONG" : "SHORT"
+                labels.push(label.new(x2, z.prox, side_ + " entry " + f_px(z.prox) + "  (" + f_num(sc) + "/10, " + how + ")",
+                     style = label.style_label_left, color = colEnt, textcolor = color.white, size = size.small))
+                labels.push(label.new(x2, stp, "Stop " + f_px(stp) + "  (distal + " + f_num(stopAtr * 100) + "% ATR)",
+                     style = label.style_label_left, color = colStp, textcolor = color.white, size = size.small))
+                labels.push(label.new(x2, half, "Sell half 1:" + f_num(halfRR) + "  " + f_px(half) + "  then trail the stop",
+                     style = label.style_label_left, color = colHlf, textcolor = color.black, size = size.small,
+                     tooltip = "After selling half, raise the stop under each new " + (z.demand ? "demand" : "supply") + " zone that forms (distal + buffer) and let the rest run."))
+                string tWhy = na(opp) ? "no opposing zone: minimum target, let it run" : str.tostring(math.round(targetFrac * 100)) + "% of the way to the next " + (z.demand ? "supply" : "demand")
+                labels.push(label.new(x2, tgt, "Target 1:" + f_num(rrT) + "  " + f_px(tgt) + "  (" + tWhy + ")",
+                     style = label.style_label_left, color = colTgt, textcolor = color.black, size = size.small))
+                // alert when price trades into the planned zone
+                bool touched = z.demand ? low <= z.prox : high >= z.prox
+                if touched
+                    alert(syminfo.ticker + ": price is in a " + f_num(sc) + "/10 " + (z.demand ? "demand" : "supply") + " zone. Entry " + f_px(z.prox) + ", stop " + f_px(stp) + ", target " + f_px(tgt) + ". Research only.", alert.freq_once_per_bar_close)
+
+    // summary table
+    string tLbl = tDir > 0 ? "up" : tDir < 0 ? "down" : "sideways"
+    float cLoc = not na(cLo) and not na(cHi) and cHi > cLo ? (price - cLo) / (cHi - cLo) : na
+    string cLbl = na(cLoc) ? "n/a" : (cLoc < 1.0 / 3 ? "low" : cLoc <= 2.0 / 3 ? "middle" : "high") + " (" + str.tostring(math.round(cLoc * 100)) + "%)" + (cKnown ? "" : ", estimated")
+    table.cell(info, 0, 0, "Silo Core Zones", text_color = color.white, text_size = size.small)
+    table.cell(info, 1, 0, "research only", text_color = color.silver, text_size = size.small)
+    table.cell(info, 0, 1, "Trend (" + trendTf + ")", text_color = color.white, text_size = size.small)
+    table.cell(info, 1, 1, tLbl + (na(tCtrl) ? "" : ", controlling " + f_px(tCtrl)), text_color = color.white, text_size = size.small)
+    table.cell(info, 0, 2, "Curve (" + curveTf + ")", text_color = color.white, text_size = size.small)
+    table.cell(info, 1, 2, cLbl, text_color = color.white, text_size = size.small)
+    table.cell(info, 0, 3, "Best long", text_color = color.white, text_size = size.small)
+    table.cell(info, 1, 3, na(bestL) ? "none qualifies" : bestL.fm + " " + f_num(bestLs) + "/10, 1:" + f_num(bestLrr), text_color = color.white, text_size = size.small)
+    table.cell(info, 0, 4, "Best short", text_color = color.white, text_size = size.small)
+    table.cell(info, 1, 4, not showShort ? "off" : na(bestS) ? "none qualifies" : bestS.fm + " " + f_num(bestSs) + "/10, 1:" + f_num(bestSrr), text_color = color.white, text_size = size.small)
+    table.cell(info, 0, 5, "Min reward:risk", text_color = color.white, text_size = size.small)
+    table.cell(info, 1, 5, "1:" + f_num(minRR) + ", half off at 1:" + f_num(halfRR), text_color = color.white, text_size = size.small)
