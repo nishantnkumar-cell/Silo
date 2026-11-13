@@ -123,12 +123,19 @@ class OllamaClient(LLMClient):
     temperature: float = 0.0
     seed: int = 7
     timeout: float = 600.0
+    retries: int = 4
+    backoff: float = 15.0  # seconds; doubles each retry (15, 30, 60, 120)
+    _sleep: object = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if urlparse(self.host).hostname not in LOCAL_HOSTS:
             raise LLMError(f"Ollama host must be local (got {self.host}); Silo keeps prompts on this machine")
         if self.cutoff is None:
             self.cutoff = cutoff_for(self.model) or "unknown"
+        if self._sleep is None:
+            import time
+
+            self._sleep = time.sleep
 
     def _ask(self, system: str, prompt: str) -> str:
         body = json.dumps({
@@ -136,11 +143,17 @@ class OllamaClient(LLMClient):
             "options": {"temperature": self.temperature, "seed": self.seed},
         }).encode()
         req = urllib.request.Request(f"{self.host}/api/generate", body, {"Content-Type": "application/json"})
-        try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as r:  # noqa: S310 - local host only
-                return json.loads(r.read())["response"]
-        except OSError as exc:
-            raise LLMError(f"could not reach Ollama at {self.host}: {exc}. Is `ollama serve` running?") from exc
+        last = None
+        for attempt in range(self.retries + 1):  # a runner crash or a reset connection shouldn't end a long run
+            try:
+                with urllib.request.urlopen(req, timeout=self.timeout) as r:  # noqa: S310 - local host only
+                    return json.loads(r.read())["response"]
+            except OSError as exc:  # includes HTTPError (e.g. 500), URLError and connection resets
+                last = exc
+                if attempt < self.retries:
+                    self._sleep(self.backoff * (2 ** attempt))
+        raise LLMError(f"could not reach Ollama at {self.host} after {self.retries + 1} tries: {last}. "
+                       "Is `ollama serve` running?") from last
 
 
 _NUM = re.compile(r"(?P<id>[A-Z]{1,3}|[A-Z0-9.]+\.L)\s*\|\s*(?P<rest>.*)")
