@@ -82,6 +82,10 @@ def cmd_fetch(args) -> int:
 
         symbols = symbols + UK_CANDIDATES
     failed = []
+    if args.macro:
+        from silo.data.macro import fetch_all
+
+        failed += [f"macro:{n}" for n in fetch_all(vault)]
     for symbol in symbols:
         try:
             stored = vault.put_bars(symbol, SOURCES[args.source](symbol))
@@ -95,8 +99,11 @@ def cmd_fetch(args) -> int:
 
 
 def _demo_tables(n=4, n_days=2000):
+    from silo.data.macro import synthetic_macro
+
     symbols = [f"SYN{i}" for i in range(n)]
-    return symbols, {s: normalize_bars(synthetic_bars(n_days=n_days, seed=i)) for i, s in enumerate(symbols)}
+    tables = {s: normalize_bars(synthetic_bars(n_days=n_days, seed=i)) for i, s in enumerate(symbols)}
+    return symbols, tables | synthetic_macro(tables[symbols[0]].index)
 
 
 def _run_all(tables, symbols, names, start=None, end=None, **rules) -> dict[str, dict[str, float]]:
@@ -105,7 +112,7 @@ def _run_all(tables, symbols, names, start=None, end=None, **rules) -> dict[str,
 
 def cmd_backtest(args) -> int:
     vault = DataVault(args.data_dir)
-    tables = {s: vault.get_bars(s) for s in args.symbols}
+    tables = vault.tables(args.symbols)
     names = _everything() if args.strategy == "all" else ["buy_and_hold", args.strategy]
     _print_table(_run_all(tables, args.symbols, names, args.start, args.end, **_rules(args, args.symbols)))
     return 0
@@ -133,7 +140,7 @@ def cmd_lab(args) -> int:
             return 2
         vault = DataVault(args.data_dir)
         symbols = args.symbols
-        tables = {s: vault.get_bars(s) for s in symbols}
+        tables = vault.tables(symbols)
     names = [n for n in STUDY_STRATEGIES if n in _everything()] if args.strategy == "all" else [args.strategy]
     log = HoldoutLog(Path(args.out) / "holdout_log.jsonl")
     for name in names:
@@ -256,6 +263,10 @@ def cmd_daily(args) -> int:
     vault = DataVault(args.data_dir)
     if not args.no_fetch:
         failed = fetch_for_books(vault, args.paper_dir, SOURCES[args.source])
+        if not args.no_macro:
+            from silo.data.macro import fetch_all
+
+            failed += [f"macro:{n}" for n in fetch_all(vault, log=lambda m: None)]
         if failed:
             print(f"{len(failed)} symbol(s) not refreshed: {' '.join(failed)}")
     board = run_all(vault, args.paper_dir)
@@ -303,6 +314,8 @@ def main(argv: list[str] | None = None) -> int:
     f.add_argument("symbols", nargs="*")
     f.add_argument("--universe", choices=["uk"], help="also fetch the UK candidate list")
     f.add_argument("--source", choices=sorted(SOURCES), default="yfinance")
+    f.add_argument("--macro", action="store_true",
+                   help="also fetch cross-market series: pound, oil, metals, gilt yield, US shares, VIX")
     f.set_defaults(func=cmd_fetch)
 
     b = sub.add_parser("backtest", help="backtest strategies against buy-and-hold")
@@ -352,7 +365,8 @@ def main(argv: list[str] | None = None) -> int:
     lg.add_argument("--symbols", nargs="*")
     lg.add_argument("--symbols-file", default="uk.json", help="JSON list, e.g. from `silo universe uk --save`")
     lg.add_argument("--prefix", default="league")
-    lg.add_argument("--with-ai", action="store_true", help="add desk, panel and silo_agent (needs SILO_LLM)")
+    lg.add_argument("--with-ai", action="store_true",
+                    help="add the AI contestants: desk, panel, silo_agent and their cross-market versions (needs SILO_LLM)")
     lg.add_argument("--cash", type=float, default=100_000.0)
     lg.add_argument("--paper-dir", default="paper")
     _add_rule_flags(lg)
@@ -362,6 +376,7 @@ def main(argv: list[str] | None = None) -> int:
     dy.add_argument("--paper-dir", default="paper")
     dy.add_argument("--source", choices=sorted(SOURCES), default="yfinance")
     dy.add_argument("--no-fetch", action="store_true")
+    dy.add_argument("--no-macro", action="store_true", help="skip refreshing the cross-market series")
     dy.add_argument("--mirror", metavar="BOOK", help="mirror this book's newest rebalance to Trading 212 Practice")
     dy.add_argument("--fractional", action="store_true")
     dy.set_defaults(func=cmd_daily)

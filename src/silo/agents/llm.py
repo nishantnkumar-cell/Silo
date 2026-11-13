@@ -158,8 +158,11 @@ class RuleBot(LLMClient):
     model: str = "rulebot"
 
     def _ask(self, system: str, prompt: str) -> str:
-        rows = {}
+        rows, header = {}, []
         for line in prompt.splitlines():
+            if line.startswith("id | ") and not header:
+                header = [c.strip() for c in line.split("|")[1:]]
+                continue
             m = _NUM.match(line.strip())
             if not m:
                 continue
@@ -174,7 +177,16 @@ class RuleBot(LLMClient):
             score = {k: v[7] - 0.05 * v[4] for k, v in rows.items()}
         if "defensive" in system.lower() or "risk" in system.lower():
             score = {k: -v[4] - 0.5 * abs(v[6]) for k, v in rows.items()}
+        def col(v, name):  # an extra column by its header, 0 when absent
+            i = header.index(name) if name in header else -1
+            return v[i] if 0 <= i < len(v) else 0.0
+
+        if "cross-market" in system.lower():
+            score = {k: col(v, "sector vs market 6-month %") + col(v, "macro-implied 3-month %")
+                     for k, v in rows.items()}
         ranked = sorted(score, key=lambda k: -score[k])
+        if '"favours"' in prompt:
+            return json.dumps({"note": "rulebot", "favours": ranked[:5], "avoids": ranked[::-1][:5]})
         if '"scores"' in prompt:
             n = max(1, len(ranked))
             return json.dumps({"scores": {k: round(1 - 2 * i / n, 2) for i, k in enumerate(ranked)},

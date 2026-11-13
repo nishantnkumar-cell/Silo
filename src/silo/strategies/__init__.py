@@ -9,6 +9,7 @@ from silo.strategies.classic import (
     TrendQuality,
     VolTarget,
 )
+from silo.strategies.crossasset import MacroTilt, SectorMomentum
 from silo.strategies.random_entry import RandomEntry
 
 REGISTRY = {
@@ -19,13 +20,17 @@ REGISTRY = {
     "bollinger": BollingerFade,
     "momentum": Momentum12_1,
     "uk_trend": TrendQuality,
+    "sector_mom": SectorMomentum,
+    "macro_tilt": MacroTilt,
     "random": RandomEntry,
 }
 
 from silo.agents.blend import Blend, SiloAgent  # noqa: E402 - these build members from REGISTRY
 from silo.agents.contestants import DebateDesk, StylePanel  # noqa: E402
+from silo.agents.informed import InformedDesk, InformedPanel  # noqa: E402
 
-REGISTRY.update({"desk": DebateDesk, "panel": StylePanel, "blend": Blend, "silo_agent": SiloAgent})
+REGISTRY.update({"desk": DebateDesk, "panel": StylePanel, "blend": Blend, "silo_agent": SiloAgent,
+                 "panel_macro": InformedPanel, "desk_macro": InformedDesk})
 
 __all__ = [
     "REGISTRY",

@@ -19,7 +19,7 @@ import pandas as pd
 
 from silo.broker import CostModel, SimBroker
 from silo.constraints import Constraints, apply_constraints, is_rebalance_day
-from silo.firewall import PointInTimeView, PreparedTables
+from silo.firewall import PointInTimeView, PreparedTables, is_context
 from silo.liquidity import apply_liquidity
 from silo.metrics import summarize
 from silo.strategies.base import Strategy
@@ -41,19 +41,25 @@ class BacktestResult:
 
 
 class MarketData:
-    """Tables prepared once for fast point-in-time reads and daily lookups."""
+    """Tables prepared once for fast point-in-time reads and daily lookups.
+
+    Context tables (``ctx:`` names: macro series, news) are readable through
+    views but are never priced, traded or used to pick trading days.
+    """
 
     def __init__(self, tables: dict[str, pd.DataFrame]) -> None:
         self.tables = tables
         self.prepared = PreparedTables(tables)
         self.rows = {}
         for s, df in tables.items():
+            if is_context(s):
+                continue
             div = df["dividend"].to_numpy() if "dividend" in df.columns else [0.0] * len(df)
             vol = df["volume"].to_numpy() if "volume" in df.columns else [float("nan")] * len(df)
             self.rows[s] = dict(
                 zip(df.index, zip(df["open"].to_numpy(), df["close"].to_numpy(), df["available_at"], div, vol))
             )
-        self.dates = sorted(set().union(*(df.index for df in tables.values())))
+        self.dates = sorted(set().union(*(df.index for s, df in tables.items() if not is_context(s))))
 
 
 @dataclass
@@ -142,7 +148,7 @@ def run_backtest(
     costs: CostModel | None = None,
     constraints: Constraints | None = None,
 ) -> BacktestResult:
-    data = MarketData({s: tables[s] for s in strategy.symbols})
+    data = MarketData({s: tables[s] for s in strategy.symbols} | {k: v for k, v in tables.items() if is_context(k)})
     lo = None if start is None else pd.Timestamp(start)
     hi = None if end is None else pd.Timestamp(end)
     session = Session.start(strategy, cash, costs, constraints)

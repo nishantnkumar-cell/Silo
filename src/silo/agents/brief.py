@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import string
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 
@@ -34,9 +34,10 @@ def _labels(n: int) -> list[str]:
 
 @dataclass
 class Brief:
-    rows: dict[str, list[float]]  # symbol -> numbers in COLUMNS order
+    rows: dict[str, list[float]]  # symbol -> numbers in COLUMNS order, then any extra columns
     alias: dict[str, str]  # symbol -> label shown to the model
     market: str
+    extra: list[str] = field(default_factory=list)  # headers of columns added by context agents
 
     @property
     def unalias(self) -> dict[str, str]:
@@ -44,12 +45,20 @@ class Brief:
 
     def table(self, symbols: list[str] | None = None) -> str:
         names = symbols or list(self.rows)
-        lines = [HEADER]
+        lines = [HEADER + "".join(f" | {h}" for h in self.extra)]
         for s in names:
             v = self.rows[s]
-            lines.append(f"{self.alias[s]} | " + " | ".join(f"{x:+.1f}" if i < 8 else f"{x:.1f}"
+            lines.append(f"{self.alias[s]} | " + " | ".join(f"{x:+.1f}" if i != 8 else f"{x:.1f}"
                                                           for i, x in enumerate(v)))
         return "\n".join(lines)
+
+    def add_columns(self, columns: list[tuple[str, dict[str, float]]]) -> None:
+        """Append columns (header, symbol -> value) to every row; missing values are 0."""
+        for header, values in columns:
+            self.extra.append(header)
+            for s, row in self.rows.items():
+                v = values.get(s, 0.0)
+                row.append(float(v) if v is not None and np.isfinite(v) else 0.0)
 
     def to_symbols(self, labels) -> list[str]:
         back = self.unalias

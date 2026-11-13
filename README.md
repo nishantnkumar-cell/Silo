@@ -156,7 +156,7 @@ How the AI is kept honest:
 ollama pull qwen2.5:7b
 $env:SILO_LLM = "ollama:qwen2.5:7b"
 
-silo fetch --universe uk
+silo fetch --universe uk --macro
 silo universe uk --save uk.json
 silo league new --with-ai                 # one paper book per contestant, same start, same cash
 silo daily                                # fetch, advance every book, print the leaderboard
@@ -167,12 +167,39 @@ silo web                                  # the dashboard lists every league boo
 powershell -ExecutionPolicy Bypass -File scripts\windows\install-daily-task.ps1 -Model ollama:qwen2.5:7b -Mirror league-silo_agent
 ```
 
-Without `--with-ai` the league has only the rule-based books (`uk_trend`, `momentum`, `blend` and a
-random control), which need no model. Before mirroring, run `silo paper t212-map league-silo_agent`
+Without `--with-ai` the league has only the rule-based books (`uk_trend`, `momentum`, `blend`,
+`sector_mom`, `macro_tilt` and a random control), which need no model. Before mirroring, run `silo paper t212-map league-silo_agent`
 and check the ticker file.
+
+## Cross-market agent
+
+Research behind it: [docs/news-and-cross-asset-research.md](docs/news-and-cross-asset-research.md).
+In short, sector momentum is well evidenced; the pound, oil, metals, gilt yields and US shares mostly
+explain risk and regime rather than forecast single stocks. So the agent adds numbers, not opinions:
+
+* **Data**: `silo fetch --macro` stores pound/dollar, Brent, gold, silver, copper, the S&P 500 and VIX
+  (Yahoo) and the 10-year gilt yield (Bank of England) as context tables (`ctx:macro:*`) with
+  `available_at`. Yahoo series are stamped 23:00 UTC, so a decision at the London close only sees
+  them up to the day before. Gilt yields count from noon the next working day. `silo daily`
+  refreshes them too (`--no-macro` to skip).
+* **Brief columns** (`src/silo/agents/crossasset.py`): each stock's 6-month return against its own
+  sector, its sector against the market, and the 3-month move its macro sensitivities imply. Each
+  sensitivity comes from a weekly regression on the UK market, pound, oil, copper and gilt yield.
+  The market line gives each driver's 3-month move as a percentile of its own history, never a
+  level, and counts the risk-on signals. Sector names never reach the model.
+* **Contestants** (`src/silo/agents/informed.py`): `panel_macro` is the panel plus a cross-market
+  voice. `desk_macro` is the desk with a cross-market analyst briefing both researchers, and its
+  risk manager sees the picks' combined sensitivity to each market. The original `panel` and `desk`
+  are unchanged, so their caches stay valid and the lab can compare them like for like.
+* **Rule baselines** (`src/silo/strategies/crossasset.py`): `sector_mom` (best names in the best
+  sectors) and `macro_tilt` (momentum, invested only as far as the risk-on signals allow). If these
+  can't beat the random control, the same numbers are unlikely to help the AI.
+
+Sector labels (`src/silo/universe/sectors.py`) are today's, applied to the past: a mild look-ahead,
+flagged rather than hidden.
 
 ## Next phases
 
 * Kronos (a price-forecasting model) as a contestant, once it runs on the PN50's CPU.
-* News and filings (RNS) through the firewall, so the desk can get its missing analysts.
+* News and filings (RNS) through the firewall, as event numbers for the brief (see the research doc).
 * Strategy evolution: let the model propose new rules; the lab disposes.

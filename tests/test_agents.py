@@ -15,7 +15,7 @@ from silo.data.vault import DataVault, normalize_bars
 from silo.engine import run_backtest
 from silo.firewall import PointInTimeView, PreparedTables
 from silo.lab.study import run_study
-from silo.league import create_league, fetch_for_books, run_all
+from silo.league import AI_CONTESTANTS, RULE_CONTESTANTS, create_league, fetch_for_books, run_all
 from silo.markets import UK
 
 
@@ -147,7 +147,8 @@ def test_league_runs_every_book_and_ranks_them(tmp_path):
     for s, df in full.items():
         vault.put_bars(s, df.iloc[:600], fetched_at=t0)
     made = create_league(syms, vault, tmp_path / "paper", with_ai=True)
-    assert len(made) == 7
+    n_books = len(RULE_CONTESTANTS + AI_CONTESTANTS)
+    assert len(made) == n_books
     cfg = json.loads((tmp_path / "paper" / "league-desk" / "config.json").read_text())
     assert cfg["model"]["model"] == "rulebot"
     assert create_league(syms, vault, tmp_path / "paper", with_ai=True) == []  # never overwrites
@@ -156,6 +157,6 @@ def test_league_runs_every_book_and_ranks_them(tmp_path):
                              lambda s: full[s].iloc[: 640 + 0 * next(calls)], log=lambda *_: None)
     assert failed == []
     board = run_all(vault, tmp_path / "paper")
-    assert len(board) == 7 and all(r["days"] == 40 for r in board)
+    assert len(board) == n_books and all(r["days"] == 40 for r in board)
     assert board == sorted(board, key=lambda r: -r["excess"])
     assert (tmp_path / "paper" / "league-desk" / "llm" / "calls.jsonl").exists()
