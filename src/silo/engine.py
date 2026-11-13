@@ -136,7 +136,7 @@ class Session:
 
     def result(self) -> BacktestResult:
         fills = pd.DataFrame(self.broker.fills, columns=FILL_COLUMNS)
-        divs = sum(d["qty"] * d["per_share"] for d in self.broker.dividends)
+        divs = sum(d["qty"] * d["per_share"] - d.get("withheld", 0.0) for d in self.broker.dividends)
         return BacktestResult(
             self.strategy.name, pd.Series(self.equity, name="equity", dtype=float), fills,
             self.decisions, self.broker.fees_paid, divs, list(self.broker.dividends),

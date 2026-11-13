@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from dataclasses import replace
 from pathlib import Path
 
@@ -47,10 +48,11 @@ def _print_table(rows: dict[str, dict[str, float]]) -> None:
 def _rules(args, symbols) -> dict:
     """Costs and constraints from flags; UK books get UK costs automatically."""
     market = market_for_symbols(symbols) if symbols else None
-    auto = CostModel.for_market(market.code) if market else CostModel()
+    auto = CostModel.for_uk_investor(market.code) if market else CostModel()
     if args.style == "daily" and market and market.code == "US":
         auto = CostModel.us_from_uk()  # a UK investor pays FX on dollar ETFs
-    costs = {"auto": auto, "us": CostModel(), "us-from-uk": CostModel.us_from_uk(), "uk": CostModel.uk(),
+    costs = {"auto": auto, "us": CostModel(), "us-from-uk": CostModel.us_from_uk(),
+             "us-shares": CostModel.us_shares_from_uk(), "uk": CostModel.uk(),
              "crypto": CostModel.crypto(), "none": CostModel(0, 0, 0, 0, 0)}[args.costs]
     if getattr(args, "cost_scale", None):
         costs = costs.scaled(args.cost_scale)
@@ -79,8 +81,10 @@ def _rules(args, symbols) -> dict:
 
 
 def _add_rule_flags(p) -> None:
-    p.add_argument("--costs", choices=["auto", "us", "us-from-uk", "uk", "crypto", "none"], default="auto",
-                   help="cost model; auto picks UK costs (with stamp duty) for .L tickers, exchange fees "
+    p.add_argument("--costs", choices=["auto", "us", "us-from-uk", "us-shares", "uk", "crypto", "none"],
+                   default="auto",
+                   help="cost model; auto picks UK costs (with stamp duty) for .L tickers, FX fee and 15%% "
+                        "dividend tax for US shares, exchange fees "
                         "for crypto, and adds the FX fee for US ETFs in daily books")
     p.add_argument("--cost-scale", type=float,
                    help="multiply every cost, e.g. 2 to check a result survives double the costs")
@@ -106,12 +110,17 @@ def cmd_fetch(args) -> int:
         from silo.universe import DAILY_UNIVERSES
 
         symbols = symbols + DAILY_UNIVERSES[args.universe]
+    if args.symbols_file:
+        symbols = symbols + json.loads(Path(args.symbols_file).read_text())
+    symbols = list(dict.fromkeys(symbols))
     failed = []
     if args.macro:
         from silo.data.macro import fetch_all
 
         failed += [f"macro:{n}" for n in fetch_all(vault)]
-    for symbol in symbols:
+    for i, symbol in enumerate(symbols):
+        if i and args.pause:
+            time.sleep(args.pause)  # be gentle with the data source on long lists
         try:
             stored = vault.put_bars(symbol, SOURCES[args.source](symbol))
         except Exception as exc:  # noqa: BLE001 - keep going, report at the end
@@ -204,25 +213,68 @@ def cmd_lab(args) -> int:
 
 
 def cmd_universe(args) -> int:
-    from silo.universe import UK_CANDIDATES, quality_screen, screen
+    from silo.universe import UK_CANDIDATES, quality_screen
+    from silo.universe.pool import rank_pool, sectors_today
 
     vault = DataVault(args.data_dir)
-    have = [s for s in UK_CANDIDATES if vault.snapshots(s)]
-    if not have:
-        print("no UK data cached yet; run `silo fetch --universe uk` first")
+    market = args.market.upper()
+    if args.candidates:
+        candidates = json.loads(Path(args.candidates).read_text())
+    elif market == "UK":
+        candidates = UK_CANDIDATES
+    else:
+        print("pass --candidates pool/us-candidates.json (from `silo pool instruments`)")
         return 1
-    table = screen({s: vault.get_bars(s) for s in have})
+    have = [s for s in candidates if vault.snapshots(s)]
+    if not have:
+        print(f"no {market} data cached yet; run `silo fetch --symbols-file ...` first")
+        return 1
+    tables = {s: vault.get_bars(s) for s in have}
+    sectors = None
+    if args.sector_cap:
+        prelim = rank_pool(tables, liquidity=Liquidity.for_market(market))
+        sectors = sectors_today(list(prelim.index[prelim["passes"]]))
+    table = rank_pool(tables, liquidity=Liquidity.for_market(market), top=args.top, sectors=sectors,
+                      max_volatility=args.max_volatility)
     if args.quality:
-        q = quality_screen(list(table.index))
+        q = quality_screen(list(table.index[table["picked"]]))
         table = table.join(q[["quality", "reason"]].rename(columns={"reason": "quality_reason"}))
-        table["passes"] = table["passes"].astype(bool) & table["quality"].fillna(False).astype(bool)
+        table["picked"] = table["picked"] & table["quality"].fillna(False).astype(bool)
     with pd.option_context("display.max_rows", None, "display.width", 160):
-        print(table.to_string())
-    picked = list(table.index[table["passes"].astype(bool)])
-    print(f"\n{len(picked)} of {len(have)} pass: {' '.join(picked)}")
+        print(table[table["passes"]].to_string() if args.passing_only else table.to_string())
+    picked = list(table.index[table["picked"]])
+    print(f"\n{int(table['passes'].sum())} of {len(have)} pass the gate and trend; picked {len(picked)}: "
+          f"{' '.join(picked)}")
+    print(DISCLAIMER)
     if args.save:
         Path(args.save).write_text(json.dumps(picked))
         print(f"saved to {args.save}")
+    return 0
+
+
+def cmd_pool(args) -> int:
+    """Trading 212 Practice instrument list -> Yahoo candidate lists per market."""
+    from datetime import datetime, timezone
+
+    from silo.brokers.trading212 import Trading212Demo
+    from silo.universe.pool import candidates_from_instruments
+
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    instruments = Trading212Demo().instruments()
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    snap = out / f"t212-instruments-{stamp}.json"
+    if snap.exists():
+        raise SystemExit(f"{snap} already exists; snapshots are never overwritten")
+    snap.write_text(json.dumps(instruments))
+    by_market = candidates_from_instruments(instruments)
+    for market, rows in by_market.items():
+        path = out / f"{market.lower()}-candidates.json"
+        path.write_text(json.dumps(sorted(rows)))
+        print(f"{market}: {len(rows)} shares -> {path}")
+    print(f"{len(instruments)} instruments listed; snapshot kept at {snap}")
+    print("next: silo fetch --symbols-file pool/us-candidates.json --pause 1, "
+          "then silo universe us --candidates pool/us-candidates.json --top 60 --save us.json")
     return 0
 
 
@@ -652,6 +704,8 @@ def main(argv: list[str] | None = None) -> int:
     f.add_argument("--universe", choices=["uk", "silver", "crypto"],
                    help="also fetch a candidate list: UK shares, silver ETFs (SLV SIVR) or crypto (BTC ETH)")
     f.add_argument("--source", choices=sorted(SOURCES), default="yfinance")
+    f.add_argument("--symbols-file", help="JSON list of symbols, e.g. pool/us-candidates.json")
+    f.add_argument("--pause", type=float, default=0.0, help="seconds between symbols on long lists")
     f.add_argument("--macro", action="store_true",
                    help="also fetch cross-market series: pound, oil, metals, gilt yield, US shares, VIX")
     f.set_defaults(func=cmd_fetch)
@@ -680,11 +734,22 @@ def main(argv: list[str] | None = None) -> int:
     _add_rule_flags(lab)
     lab.set_defaults(func=cmd_lab)
 
-    u = sub.add_parser("universe", help="screen the UK candidate list on cached data")
-    u.add_argument("market", choices=["uk"])
+    u = sub.add_parser("universe", help="gate and rank a candidate list on cached data (momentum and trend)")
+    u.add_argument("market", choices=["uk", "us"])
+    u.add_argument("--candidates", help="JSON list of symbols (default: the built-in UK list)")
+    u.add_argument("--top", type=int, default=60, help="how many of the best-ranked to pick")
+    u.add_argument("--max-volatility", type=float, default=0.60, help="drop names wilder than this a year")
+    u.add_argument("--sector-cap", action="store_true",
+                   help="at most 25%% of picks from one sector (today's sectors from Yahoo; live use only)")
+    u.add_argument("--passing-only", action="store_true", help="print only names that pass")
     u.add_argument("--quality", action="store_true", help="also check today's fundamentals (live use only)")
     u.add_argument("--save", help="write passing symbols to this JSON file")
     u.set_defaults(func=cmd_universe)
+
+    po = sub.add_parser("pool", help="list every UK and US share on Trading 212 Practice as Yahoo candidates")
+    po.add_argument("action", choices=["instruments"])
+    po.add_argument("--out", default="pool", help="folder for the dated snapshot and candidate lists")
+    po.set_defaults(func=cmd_pool)
 
     pp = sub.add_parser("paper", help="forward paper trading on the simulator")
     pp.add_argument("action", choices=["new", "run", "status", "t212-map", "t212-check", "t212-fills"])

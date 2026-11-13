@@ -24,6 +24,7 @@ class CostModel:
     commission_bps: float = 0.0  # percentage fee on traded value, both sides (crypto exchanges)
     fx_bps: float = 0.0  # currency conversion on traded value, both sides (pounds into dollars)
     llm_cost_per_decision: float = 0.0  # set when an LLM agent makes decisions
+    dividend_tax: float = 0.0  # share of each dividend withheld at source (US shares for a UK investor: 15%)
 
     @classmethod
     def uk(cls, **overrides) -> CostModel:
@@ -51,6 +52,21 @@ class CostModel:
         base = dict(fx_bps=15.0)
         base.update(overrides)
         return cls(**base)
+
+    @classmethod
+    def us_shares_from_uk(cls, **overrides) -> CostModel:
+        """US shares bought from a UK Trading 212 account: no commission, a
+        0.15% FX fee each way, tight large-cap spreads, and 15% US tax withheld
+        from dividends (the treaty rate with a W-8BEN form on file)."""
+        base = dict(commission_per_share=0.0, min_commission=0.0, fx_bps=15.0,
+                    spread_bps=4.0, slippage_bps=3.0, dividend_tax=0.15)
+        base.update(overrides)
+        return cls(**base)
+
+    @classmethod
+    def for_uk_investor(cls, code: str) -> CostModel:
+        """Costs for a pound-based investor: US shares pay FX and dividend tax."""
+        return cls.us_shares_from_uk() if code == "US" else cls.for_market(code)
 
     @classmethod
     def crypto(cls, **overrides) -> CostModel:
@@ -144,8 +160,9 @@ class SimBroker:
         for symbol, amount in per_share.items():
             qty = self.positions.get(symbol, 0.0)
             if qty and amount:
-                self.cash += qty * amount
-                self.dividends.append({"date": date, "symbol": symbol, "qty": qty, "per_share": amount})
+                self.cash += qty * amount * (1.0 - self.costs.dividend_tax)
+                self.dividends.append({"date": date, "symbol": symbol, "qty": qty, "per_share": amount,
+                                       "withheld": qty * amount * self.costs.dividend_tax})
 
     def fill_at_open(
         self, opens: dict[str, float], date: pd.Timestamp, volumes: dict[str, float] | None = None
