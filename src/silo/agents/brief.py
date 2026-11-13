@@ -40,12 +40,16 @@ class Brief:
     extra: list[str] = field(default_factory=list)  # headers of columns added by context agents
 
     @property
+    def header(self) -> str:
+        return HEADER + "".join(f" | {h}" for h in self.extra)
+
+    @property
     def unalias(self) -> dict[str, str]:
         return {v: k for k, v in self.alias.items()}
 
     def table(self, symbols: list[str] | None = None) -> str:
         names = symbols or list(self.rows)
-        lines = [HEADER + "".join(f" | {h}" for h in self.extra)]
+        lines = [self.header]
         for s in names:
             v = self.rows[s]
             lines.append(f"{self.alias[s]} | " + " | ".join(f"{x:+.1f}" if i != 8 else f"{x:.1f}"
@@ -91,8 +95,14 @@ def build_brief(
     anonymize: bool = True,
     liquidity: Liquidity | None = Liquidity(),
     limit: int | None = None,
+    extra=None,
 ) -> Brief:
-    """Numbers for every symbol that has enough history (and passes liquidity)."""
+    """Numbers for every symbol that has enough history (and passes liquidity).
+
+    ``extra`` is an optional ``(header_suffix, fn(view, symbol) -> list[float])``
+    that appends columns, e.g. the supply-and-demand readings for agents that
+    follow the Core Strategy rulebook. Without it the brief is unchanged.
+    """
     rows = {}
     for s in symbols:
         if liquidity is not None and not liquidity.check(view, s)[0]:
@@ -106,6 +116,11 @@ def build_brief(
     order = sorted(symbols, key=lambda s: hashlib.sha256(s.encode()).hexdigest())
     alias = dict(zip(order, _labels(len(order)))) if anonymize else {s: s for s in symbols}
     alias = {s: alias[s] for s in rows}
+    extra_headers = []
+    if extra is not None:
+        suffix, fn = extra
+        extra_headers.append(suffix)
+        rows = {s: v + list(fn(view, s)) for s, v in rows.items()}
     if rows:
         m3 = np.mean([v[1] for v in rows.values()])
         above = np.mean([v[5] > 0 for v in rows.values()])
@@ -114,4 +129,4 @@ def build_brief(
                   f"{above:.0%} trade above their 200-day average; median volatility {vol:.0f}%.")
     else:
         market = "Market: no stocks have enough history yet."
-    return Brief(rows, alias, market)
+    return Brief(rows, alias, market, extra_headers)

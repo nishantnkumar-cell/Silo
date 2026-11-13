@@ -35,6 +35,7 @@ class BacktestResult:
     decisions: list[dict] = field(default_factory=list)
     fees_paid: float = 0.0
     dividends: float = 0.0
+    dividend_events: list[dict] = field(default_factory=list)
 
     def metrics(self) -> dict[str, float]:
         return summarize(self.equity, self.fills)
@@ -118,6 +119,9 @@ class Session:
                 final = apply_constraints(target, current, self.held_days, self.constraints)
                 self.broker.target_weights(final, self.last_close, clock)
                 decision = {"date": date, "clock": clock, "weights": dict(final), "proposed": dict(weights)}
+                notes = getattr(self.strategy, "last_notes", None)
+                if notes:  # the strategy's own reasons (e.g. which names the bear warned about), for the journal
+                    decision["notes"] = notes
                 if blocked:
                     decision["liquidity"] = blocked
                 self.decisions.append(decision)
@@ -135,7 +139,7 @@ class Session:
         divs = sum(d["qty"] * d["per_share"] - d.get("withheld", 0.0) for d in self.broker.dividends)
         return BacktestResult(
             self.strategy.name, pd.Series(self.equity, name="equity", dtype=float), fills,
-            self.decisions, self.broker.fees_paid, divs,
+            self.decisions, self.broker.fees_paid, divs, list(self.broker.dividends),
         )
 
 

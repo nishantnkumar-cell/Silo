@@ -330,3 +330,47 @@ Judge any AI result only after the model's training cutoff. For news, also check
 
 * Kronos (a price-forecasting model) as a contestant, once it runs on the PN50's CPU.
 * Strategy evolution: let the model propose new rules; the lab disposes.
+
+## Core Strategy rules (supply and demand)
+
+The project owner studied a supply-and-demand trading course. Its rules are written up in
+[`docs/core-strategy-rulebook.md`](docs/core-strategy-rulebook.md) (what each rule says, how it is
+coded, and which rules can't be tested) and implemented three ways:
+
+| Contestant | What it is |
+|---|---|
+| `core_zones` | Rules only. Weekly: score every active daily demand zone out of 10 (strength, time, freshness, weekly trend, monthly curve, profit zone), apply the curve x trend decision table, buy when price is back at a zone that scores 7+ (8.5+ buys at the zone, 7-8 waits for confirmation). Stop 10% of a day's range below the zone, target 75% of the way to the next supply and at least 3x the risk; 2% risk per trade, 6% in total. |
+| `core_trail` | The same entries, no fixed target: the stop trails under each new demand zone. |
+| `core_desk` | The AI debate desk with the rulebook in its prompts and six zone readings per stock. |
+
+```bash
+silo league backtest --all-candidates --start 2012-01-01 --only core_zones core_trail momentum random --out reports/league-core
+silo lab --all-candidates --strategy core_zones --out reports/lab-core
+```
+
+## Learning from past trades
+
+Silo's agents can learn from their own trades, but nothing they learn goes live until it has
+held up on data it wasn't drawn from. Details in [`docs/learning-loop.md`](docs/learning-loop.md).
+
+1. **Journal.** Every position from open to close: the numbers the agent saw when it bought, its
+   reasons (for AI desks: which names the bull backed and the bear warned about, the trader's
+   "why"), and the result after costs and dividends next to the market over the same weeks.
+2. **Review.** A statistical miner looks for entry conditions that kept losing to the market; with
+   `--ai` a model reads an anonymised summary (no names, no dates) and proposes at most three
+   lessons in a fixed rule format such as "don't buy when the 12-month return is above 60%".
+3. **Gate.** A lesson is accepted only if, on a later window and never the locked holdout, the
+   agent with it beats the same agent without it, beats 95% of random filters that skip as many
+   trades, and passes a deflated Sharpe test that counts every retry. Every proposal and verdict is
+   appended to `learning/ledger.jsonl`.
+4. **Use.** The `learned` agent wraps any contestant with its accepted lessons: they stop new
+   entries (never force a sale, so no extra churn), and AI agents also get them in their prompts.
+
+```bash
+silo learn review --all-candidates --strategy core_zones --end 2019-12-31   # journal + proposals
+silo learn gate --all-candidates --strategy core_zones <lesson ids>        # test on 2020 onwards
+silo learn walkforward --all-candidates --strategy core_zones              # does learning help at all?
+silo learn list
+silo paper new learned-core --strategy learned --symbols-file uk.json \
+    --params "$(silo learn params --strategy core_zones)"
+```

@@ -158,6 +158,9 @@ class RuleBot(LLMClient):
     model: str = "rulebot"
 
     def _ask(self, system: str, prompt: str) -> str:
+        if '"lessons"' in prompt:  # trade review: adopt the strongest statistical candidate, if any
+            m = re.search(r"^CANDIDATE (\{.*\})$", prompt, re.M)
+            return json.dumps({"lessons": [json.loads(m.group(1))] if m else []})
         if '"vs_expectations"' in prompt:
             return json.dumps({"vs_expectations": "not said", "tone": 0})
         if '"company_guess"' in prompt:
