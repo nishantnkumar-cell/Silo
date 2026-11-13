@@ -40,6 +40,10 @@ RULES = (
 class LLMStrategy(Strategy):
     uses_llm = True
     param_grid: dict[str, list] = {}  # each extra trial costs model calls; keep the lab small
+    # Lessons from past trades that passed the learning gate (see silo.learning). Empty by
+    # default, and then prompts are byte-for-byte unchanged so cached answers stay valid.
+    guidance: str = ""
+    last_notes: dict | None = None
 
     def __init__(self, symbols, client: LLMClient | None = None, anonymize: bool = True,
                  shortlist: int = 30, top_k: int = 12):
@@ -57,7 +61,10 @@ class LLMStrategy(Strategy):
         return self.llm.cutoff
 
     def ask(self, role: str, system: str, prompt: str, clock) -> dict:
-        return parse_json(self.llm.complete(f"{RULES}\n\n{system}", prompt, role=f"{self.name}:{role}", clock=clock))
+        system = f"{RULES}\n\n{system}"
+        if self.guidance:
+            system += f"\n\nLessons from your own past trades, each checked on later data before use:\n{self.guidance}"
+        return parse_json(self.llm.complete(system, prompt, role=f"{self.name}:{role}", clock=clock))
 
     def brief(self, view):
         """The numbers this agent is shown. Subclasses may add columns."""
@@ -79,6 +86,7 @@ class DebateDesk(LLMStrategy):
     name = "desk"
 
     def decide(self, view):
+        self.last_notes = None
         brief = self.brief(view)
         if not brief.rows:
             return {}
@@ -96,6 +104,9 @@ class DebateDesk(LLMStrategy):
                          f"{table}\n\n{debate}\n\nReply as {{\"picks\": [up to {self.top_k} ids], "
                          "\"why\": \"<2 sentences>\"}. Fewer picks is fine if few look good.", clock)
         picks = brief.to_symbols(trade.get("picks", []))
+        self.last_notes = {"bull": brief.to_symbols(_ids(bull.get("names"))),
+                           "bear": brief.to_symbols(_ids(bear.get("names"))),
+                           "why": str(trade.get("why", ""))[:400]}
         if not picks:
             return {}
         risk = self.ask("risk", "You are the risk manager. Remove any pick that is too risky to hold for "
@@ -103,7 +114,12 @@ class DebateDesk(LLMStrategy):
                         f"{brief.market}\n\n{brief.table(picks)}\n\nReply as {{\"veto\": [ids to drop], "
                         "\"why\": \"<1 sentence>\"}", clock)
         vetoed = set(brief.to_symbols(risk.get("veto", [])))
+        self.last_notes["veto"] = sorted(vetoed)
         return self.weights_for([s for s in picks if s not in vetoed], brief)
+
+
+def _ids(x) -> list:
+    return x if isinstance(x, list) else []
 
 
 STYLES = {

@@ -211,3 +211,30 @@ coded, and which rules can't be tested) and implemented three ways:
 silo league backtest --all-candidates --start 2012-01-01 --only core_zones core_trail momentum random --out reports/league-core
 silo lab --all-candidates --strategy core_zones --out reports/lab-core
 ```
+
+## Learning from past trades
+
+Silo's agents can learn from their own trades, but nothing they learn goes live until it has
+held up on data it wasn't drawn from. Details in [`docs/learning-loop.md`](docs/learning-loop.md).
+
+1. **Journal.** Every position from open to close: the numbers the agent saw when it bought, its
+   reasons (for AI desks: which names the bull backed and the bear warned about, the trader's
+   "why"), and the result after costs and dividends next to the market over the same weeks.
+2. **Review.** A statistical miner looks for entry conditions that kept losing to the market; with
+   `--ai` a model reads an anonymised summary (no names, no dates) and proposes at most three
+   lessons in a fixed rule format such as "don't buy when the 12-month return is above 60%".
+3. **Gate.** A lesson is accepted only if, on a later window and never the locked holdout, the
+   agent with it beats the same agent without it, beats 95% of random filters that skip as many
+   trades, and passes a deflated Sharpe test that counts every retry. Every proposal and verdict is
+   appended to `learning/ledger.jsonl`.
+4. **Use.** The `learned` agent wraps any contestant with its accepted lessons: they stop new
+   entries (never force a sale, so no extra churn), and AI agents also get them in their prompts.
+
+```bash
+silo learn review --all-candidates --strategy core_zones --end 2019-12-31   # journal + proposals
+silo learn gate --all-candidates --strategy core_zones <lesson ids>        # test on 2020 onwards
+silo learn walkforward --all-candidates --strategy core_zones              # does learning help at all?
+silo learn list
+silo paper new learned-core --strategy learned --symbols-file uk.json \
+    --params "$(silo learn params --strategy core_zones)"
+```
