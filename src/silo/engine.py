@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 import pandas as pd
 
 from silo.broker import CostModel, SimBroker
-from silo.firewall import PointInTimeView
+from silo.firewall import PointInTimeView, PreparedTables
 from silo.metrics import summarize
 from silo.strategies.base import Strategy
 
@@ -40,6 +40,11 @@ def run_backtest(
     costs: CostModel | None = None,
 ) -> BacktestResult:
     tables = {s: tables[s] for s in strategy.symbols}
+    prepared = PreparedTables(tables)
+    rows = {
+        s: dict(zip(df.index, zip(df["open"].to_numpy(), df["close"].to_numpy(), df["available_at"])))
+        for s, df in tables.items()
+    }
     dates = sorted(set().union(*(df.index for df in tables.values())))
     dates = [d for d in dates if (start is None or d >= pd.Timestamp(start)) and (end is None or d <= pd.Timestamp(end))]
     broker = SimBroker(cash=cash, costs=costs or CostModel())
@@ -48,13 +53,13 @@ def run_backtest(
     equity, decisions = {}, []
 
     for date in dates:
-        today = {s: df.loc[date] for s, df in tables.items() if date in df.index}
-        broker.fill_at_open({s: float(r["open"]) for s, r in today.items()}, date)
-        last_close.update({s: float(r["close"]) for s, r in today.items()})
-        clock = max(r["available_at"] for r in today.values())
+        today = {s: r[date] for s, r in rows.items() if date in r}
+        broker.fill_at_open({s: float(r[0]) for s, r in today.items()}, date)
+        last_close.update({s: float(r[1]) for s, r in today.items()})
+        clock = max(r[2] for r in today.values())
         equity[date] = broker.equity(last_close)
 
-        view = PointInTimeView(tables, clock)
+        view = PointInTimeView(prepared, clock)
         weights = strategy.decide(view)
         if weights is not None:
             if strategy.uses_llm:

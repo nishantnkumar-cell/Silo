@@ -10,5 +10,6 @@ Silo is a research-only trading lab. These rules are absolute:
 - Every new strategy must pass `tests/test_firewall.py::test_truncation_invariance`
   (add it to `silo.strategies.REGISTRY`).
 - Results are always reported next to buy-and-hold and labelled research only.
+- Never open the locked holdout (`--open-holdout`) to tune a strategy; it is for a final check, and every opening is logged.
 
 Run `pytest` before pushing.

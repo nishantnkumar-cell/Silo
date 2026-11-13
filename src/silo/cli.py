@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 
 import pandas as pd
 
@@ -57,6 +58,35 @@ def cmd_demo(args) -> int:
     return 0
 
 
+def cmd_lab(args) -> int:
+    from silo.lab import HoldoutLog, run_study
+    from silo.lab.report import write_report
+
+    if args.demo:
+        symbols = ["AAA", "BBB", "CCC", "DDD"]
+        tables = {s: normalize_bars(synthetic_bars(n_days=2000, seed=i)) for i, s in enumerate(symbols)}
+    else:
+        if not args.symbols:
+            print("give symbols, or use --demo")
+            return 2
+        vault = DataVault(args.data_dir)
+        symbols = args.symbols
+        tables = {s: vault.get_bars(s) for s in symbols}
+    names = [n for n in REGISTRY if n not in ("buy_and_hold", "random")] if args.strategy == "all" else [args.strategy]
+    log = HoldoutLog(Path(args.out) / "holdout_log.jsonl")
+    for name in names:
+        result = run_study(
+            REGISTRY[name], symbols, tables,
+            holdout_frac=args.holdout, n_folds=args.folds, n_random=args.random,
+            open_holdout=args.open_holdout, holdout_log=log,
+        )
+        path = write_report(result, Path(args.out) / f"{name}.html")
+        status = "PASS" if result.interesting else "fail"
+        print(f"{name:10s} {status}  " + "; ".join(c.detail for c in result.checks) + f"  -> {path}")
+    print(f"\n{DISCLAIMER}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="silo", description=DISCLAIMER)
     p.add_argument("--data-dir", default="data")
@@ -73,6 +103,17 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("--start")
     b.add_argument("--end")
     b.set_defaults(func=cmd_backtest)
+
+    lab = sub.add_parser("lab", help="walk-forward study with luck checks and an HTML report")
+    lab.add_argument("symbols", nargs="*")
+    lab.add_argument("--strategy", choices=["all", *[n for n in REGISTRY if n not in ("buy_and_hold", "random")]], default="all")
+    lab.add_argument("--folds", type=int, default=4)
+    lab.add_argument("--random", type=int, default=30, help="number of random-entry control runs")
+    lab.add_argument("--holdout", type=float, default=0.2, help="fraction of data locked as the final holdout")
+    lab.add_argument("--open-holdout", action="store_true", help="evaluate on the locked holdout (logged)")
+    lab.add_argument("--out", default="reports")
+    lab.add_argument("--demo", action="store_true", help="use synthetic data, offline")
+    lab.set_defaults(func=cmd_lab)
 
     d = sub.add_parser("demo", help="run every strategy on synthetic data, offline")
     d.set_defaults(func=cmd_demo)

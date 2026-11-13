@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
+import numpy as np
 import pandas as pd
 
 
@@ -17,26 +18,49 @@ class FutureDataError(LookupError):
     """Raised when code asks for data that was not yet public at the clock."""
 
 
-class PointInTimeView:
-    def __init__(self, tables: Mapping[str, pd.DataFrame], clock: pd.Timestamp) -> None:
-        for name, df in tables.items():
+class PreparedTables(Mapping):
+    """Tables split once into data and an ``available_at`` array, for fast views."""
+
+    def __init__(self, tables: Mapping[str, pd.DataFrame]) -> None:
+        self._raw = dict(tables)
+        self._data: dict[str, pd.DataFrame] = {}
+        self._avail: dict[str, np.ndarray] = {}
+        for name, df in self._raw.items():
             if "available_at" not in df.columns:
                 raise ValueError(f"table {name!r} has no available_at column")
-        self._tables = tables
+            avail = pd.DatetimeIndex(df["available_at"])
+            if not avail.is_monotonic_increasing:
+                raise ValueError(f"table {name!r} available_at is not sorted")
+            self._avail[name] = avail.tz_convert("UTC").as_unit("ns").asi8
+            self._data[name] = df.drop(columns="available_at")
+
+    def __getitem__(self, name: str) -> pd.DataFrame:
+        return self._raw[name]
+
+    def __iter__(self):
+        return iter(self._raw)
+
+    def __len__(self) -> int:
+        return len(self._raw)
+
+    def cut(self, name: str, clock: pd.Timestamp) -> int:
+        return int(np.searchsorted(self._avail[name], clock.as_unit("ns").value, side="right"))
+
+
+class PointInTimeView:
+    def __init__(self, tables: Mapping[str, pd.DataFrame], clock: pd.Timestamp) -> None:
+        self._t = tables if isinstance(tables, PreparedTables) else PreparedTables(tables)
         self.clock = _utc(clock)
 
     @property
     def symbols(self) -> list[str]:
-        return list(self._tables)
+        return list(self._t)
 
     def bars(self, symbol: str, lookback: int | None = None) -> pd.DataFrame:
         """Rows of ``symbol`` public at the clock (a copy), newest last."""
-        df = self._tables[symbol]
-        cut = int(df["available_at"].searchsorted(self.clock, side="right"))
-        out = df.iloc[:cut]
-        if lookback is not None:
-            out = out.iloc[-lookback:]
-        return out.drop(columns="available_at").copy()
+        cut = self._t.cut(symbol, self.clock)
+        lo = 0 if lookback is None else max(0, cut - lookback)
+        return self._t._data[symbol].iloc[lo:cut].copy()
 
     def close(self, symbol: str, lookback: int | None = None) -> pd.Series:
         return self.bars(symbol, lookback)["close"]
@@ -47,7 +71,7 @@ class PointInTimeView:
 
     def bar_on(self, symbol: str, date: str | pd.Timestamp) -> pd.Series:
         """One bar by date; refuses dates whose bar was not yet public."""
-        df = self._tables[symbol]
+        df = self._t[symbol]
         ts = pd.Timestamp(date).normalize()
         if ts not in df.index:
             raise KeyError(f"{symbol} has no bar on {ts.date()}")
