@@ -125,8 +125,54 @@ pytest
 
 `silo fetch --source stooq` is a fallback when Yahoo rate-limits.
 
+## Phase 3 and 4: AI contestants, Silo's own agent, and the league
+
+All AI strategies run on a **free local model** through [Ollama](https://ollama.com), so nothing
+leaves the computer and bulk backtests cost nothing. Choose the model with `SILO_LLM`.
+
+| Strategy | File | What it is |
+|---|---|---|
+| `desk` | `src/silo/agents/contestants.py` | After TradingAgents: a bull and a bear researcher argue, a trader picks up to 12 names, a risk manager can veto. Four model calls a week. |
+| `panel` | `src/silo/agents/contestants.py` | After ai-hedge-fund: trend, contrarian, income and defensive investors score every stock; a portfolio manager averages the scores. Four calls a week. |
+| `blend` | `src/silo/agents/blend.py` | Silo's own agent, rules only: runs `uk_trend`, `momentum` and `donchian` side by side, scores each on what its last picks earned (recent weeks count most), follows the ones that are working, and halves exposure when nothing is working or most of the market is below its 200-day average. |
+| `silo_agent` | `src/silo/agents/blend.py` | The same blend with `desk` and `panel` on board. |
+
+How the AI is kept honest:
+
+* The model sees only a table of numbers from the time firewall (returns, volatility, distance from
+  the 200-day average, drawdown, dividend yield, value traded). **Tickers are replaced with letters and
+  dates are hidden**, so it can't recognise a company and remember what happened next.
+* Every call is logged (`<book>/llm/calls.jsonl` for paper books) with the model and its **training
+  cutoff**. The lab adds a check that fails when the test period starts before that cutoff.
+* Replies are cached by prompt, so reruns replay the same answers and cost nothing.
+* A reply that isn't valid JSON, or names stocks that aren't in the table, means no trade.
+* AI strategies go through the same liquidity and position-trading rules as everything else.
+* `SILO_LLM=rulebot` is an offline stand-in used by tests. It is a fixed rule, not an AI.
+
+### Running the league on the PN50 (Windows)
+
+```powershell
+# once: install Ollama from https://ollama.com, then
+ollama pull qwen2.5:7b
+$env:SILO_LLM = "ollama:qwen2.5:7b"
+
+silo fetch --universe uk
+silo universe uk --save uk.json
+silo league new --with-ai                 # one paper book per contestant, same start, same cash
+silo daily                                # fetch, advance every book, print the leaderboard
+silo daily --mirror league-silo_agent     # also mirror one book to the Trading 212 Practice account
+silo web                                  # the dashboard lists every league book
+
+# run it automatically on weekdays at 18:30
+powershell -ExecutionPolicy Bypass -File scripts\windows\install-daily-task.ps1 -Model ollama:qwen2.5:7b -Mirror league-silo_agent
+```
+
+Without `--with-ai` the league has only the rule-based books (`uk_trend`, `momentum`, `blend` and a
+random control), which need no model. Before mirroring, run `silo paper t212-map league-silo_agent`
+and check the ticker file.
+
 ## Next phases
 
-3. Contestants: TradingAgents, AI-hedge-fund personas and Kronos adapted to UK stocks, all on the same paper account, every call logged.
-4. Own agent: score each part of each contestant, combine the best, Claude proposes and code disposes, run on paper.
-Later: amnesia test, synthetic sandbox and strategy evolution experiments.
+* Kronos (a price-forecasting model) as a contestant, once it runs on the PN50's CPU.
+* News and filings (RNS) through the firewall, so the desk can get its missing analysts.
+* Strategy evolution: let the model propose new rules; the lab disposes.

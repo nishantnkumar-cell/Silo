@@ -21,6 +21,16 @@ from silo.strategies import REGISTRY
 
 DISCLAIMER = "Research only. Simulated results, not financial advice. Silo never trades real money."
 STUDY_STRATEGIES = [n for n in REGISTRY if n not in ("buy_and_hold", "random")]
+AI_STRATEGIES = [n for n in REGISTRY if REGISTRY[n].uses_llm]
+
+
+def _everything() -> list[str]:
+    """All strategies; the AI ones only when a model is chosen with SILO_LLM."""
+    import os
+
+    if os.environ.get("SILO_LLM"):
+        return list(REGISTRY)
+    return [n for n in REGISTRY if n not in AI_STRATEGIES]
 
 
 def _print_table(rows: dict[str, dict[str, float]]) -> None:
@@ -96,7 +106,7 @@ def _run_all(tables, symbols, names, start=None, end=None, **rules) -> dict[str,
 def cmd_backtest(args) -> int:
     vault = DataVault(args.data_dir)
     tables = {s: vault.get_bars(s) for s in args.symbols}
-    names = list(REGISTRY) if args.strategy == "all" else ["buy_and_hold", args.strategy]
+    names = _everything() if args.strategy == "all" else ["buy_and_hold", args.strategy]
     _print_table(_run_all(tables, args.symbols, names, args.start, args.end, **_rules(args, args.symbols)))
     return 0
 
@@ -105,7 +115,9 @@ def cmd_demo(args) -> int:
     symbols, tables = _demo_tables()
     print("Synthetic random-walk data: there is no real signal here, so no strategy")
     print("should reliably beat buy-and-hold. If one does, suspect luck.\n")
-    _print_table(_run_all(tables, symbols, list(REGISTRY), costs=CostModel(), constraints=Constraints()))
+    names = [n for n in REGISTRY if n not in AI_STRATEGIES]
+    _print_table(_run_all(tables, symbols, names, costs=CostModel(), constraints=Constraints()))
+    print("\nAI strategies (desk, panel, silo_agent) need a model: set SILO_LLM=ollama:<model> or rulebot.")
     return 0
 
 
@@ -122,13 +134,14 @@ def cmd_lab(args) -> int:
         vault = DataVault(args.data_dir)
         symbols = args.symbols
         tables = {s: vault.get_bars(s) for s in symbols}
-    names = STUDY_STRATEGIES if args.strategy == "all" else [args.strategy]
+    names = [n for n in STUDY_STRATEGIES if n in _everything()] if args.strategy == "all" else [args.strategy]
     log = HoldoutLog(Path(args.out) / "holdout_log.jsonl")
     for name in names:
         result = run_study(
             REGISTRY[name], symbols, tables,
             holdout_frac=args.holdout, n_folds=args.folds, n_random=args.random,
             open_holdout=args.open_holdout, holdout_log=log, **_rules(args, symbols),
+            model_cutoff=getattr(REGISTRY[name](symbols), "model_cutoff", None) if name in AI_STRATEGIES else None,
         )
         path = write_report(result, Path(args.out) / f"{name}.html")
         status = "PASS" if result.interesting else "fail"
@@ -221,6 +234,59 @@ def cmd_paper(args) -> int:
     return 0
 
 
+def cmd_league(args) -> int:
+    from silo.league import create_league
+
+    vault = DataVault(args.data_dir)
+    symbols = args.symbols or json.loads(Path(args.symbols_file).read_text())
+    rules = _rules(args, symbols)
+    made = create_league(symbols, vault, args.paper_dir, args.prefix, args.with_ai, args.cash,
+                         rules["constraints"], rules["costs"])
+    for cfg in made:
+        print(f"created {cfg['name']}: {cfg['strategy']} on {len(symbols)} symbols, starts after {cfg['start_after'][:10]}")
+    if not made:
+        print("every league book already exists; nothing created")
+    return 0
+
+
+def cmd_daily(args) -> int:
+    """Fetch once, advance every paper book, print the leaderboard, optionally mirror one."""
+    from silo.league import fetch_for_books, run_all, write_leaderboard
+
+    vault = DataVault(args.data_dir)
+    if not args.no_fetch:
+        failed = fetch_for_books(vault, args.paper_dir, SOURCES[args.source])
+        if failed:
+            print(f"{len(failed)} symbol(s) not refreshed: {' '.join(failed)}")
+    board = run_all(vault, args.paper_dir)
+    path = write_leaderboard(board, args.paper_dir)
+    print(f"\n{'book':26s} {'days':>5s} {'return':>8s} {'buy&hold':>9s} {'excess':>8s} {'names':>5s}")
+    for r in board:
+        if "error" in r:
+            print(f"{r['book']:26s}  ERROR {r['error']}")
+            continue
+        print(f"{r['book']:26s} {r['days']:5d} {r['return']:8.2%} {r['benchmark_return']:9.2%} "
+              f"{r['excess']:+8.2%} {r['positions']:5d}")
+    print(f"saved {path}")
+    code = 0
+    if args.mirror:
+        from silo.brokers.trading212 import Trading212Demo
+        from silo.paper import PaperBook, mirror_latest_decision
+
+        try:
+            sent = mirror_latest_decision(PaperBook(args.mirror, args.paper_dir), Trading212Demo(),
+                                          fractional=args.fractional)
+            print(f"\nTrading 212 Practice ({args.mirror}): {len(sent)} order(s) sent" if sent else
+                  f"\nTrading 212 Practice ({args.mirror}): no new rebalance to mirror")
+            for e in sent:
+                print(f"  {e['ticker']:14s} {e['quantity']:+.4g}  {e.get('status') or e.get('error')}")
+        except Exception as exc:  # noqa: BLE001 - report, keep the paper results
+            print(f"\nTrading 212 Practice mirror failed: {exc}")
+            code = 1
+    print(f"\n{DISCLAIMER}")
+    return code
+
+
 def cmd_web(args) -> int:
     from silo.web import serve
 
@@ -280,6 +346,25 @@ def main(argv: list[str] | None = None) -> int:
     pp.add_argument("--source", choices=sorted(SOURCES), default="yfinance")
     _add_rule_flags(pp)
     pp.set_defaults(func=cmd_paper)
+
+    lg = sub.add_parser("league", help="one paper book per contestant on the same universe")
+    lg.add_argument("action", choices=["new"])
+    lg.add_argument("--symbols", nargs="*")
+    lg.add_argument("--symbols-file", default="uk.json", help="JSON list, e.g. from `silo universe uk --save`")
+    lg.add_argument("--prefix", default="league")
+    lg.add_argument("--with-ai", action="store_true", help="add desk, panel and silo_agent (needs SILO_LLM)")
+    lg.add_argument("--cash", type=float, default=100_000.0)
+    lg.add_argument("--paper-dir", default="paper")
+    _add_rule_flags(lg)
+    lg.set_defaults(func=cmd_league)
+
+    dy = sub.add_parser("daily", help="fetch prices, advance every paper book, print the leaderboard")
+    dy.add_argument("--paper-dir", default="paper")
+    dy.add_argument("--source", choices=sorted(SOURCES), default="yfinance")
+    dy.add_argument("--no-fetch", action="store_true")
+    dy.add_argument("--mirror", metavar="BOOK", help="mirror this book's newest rebalance to Trading 212 Practice")
+    dy.add_argument("--fractional", action="store_true")
+    dy.set_defaults(func=cmd_daily)
 
     w = sub.add_parser("web", help="local dashboard: paper books, lab reports, Trading 212 Practice key")
     w.add_argument("--port", type=int, default=8212)
