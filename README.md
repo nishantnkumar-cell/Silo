@@ -12,7 +12,7 @@ Plan: [AI Trading Research Harness — Development Plan](https://claude.ai/artif
 
 | Part | File | What it does |
 | --- | --- | --- |
-| Live-trading guard | `src/silo/safety.py` | Refuses live brokerage hosts and live-looking credentials at import time. Only `paper-api.alpaca.markets` is allowlisted. |
+| Live-trading guard | `src/silo/safety.py` | Refuses live brokerage hosts and live-looking credentials at import time. Only the paper hosts `paper-api.alpaca.markets` and `demo.trading212.com` (Trading 212 Practice) are allowlisted. |
 | Data vault | `src/silo/data/vault.py` | Caches daily bars as Parquet; every row carries `available_at`, the UTC moment it became public. |
 | Data sources | `src/silo/data/sources.py` | yfinance and Stooq (free), plus synthetic random walks for offline tests. |
 | Time firewall | `src/silo/firewall.py` | `PointInTimeView` only returns rows public at the simulated clock; asking for newer data raises `FutureDataError`. |
@@ -190,7 +190,7 @@ How the AI is kept honest:
 * Every call is logged (`<book>/llm/calls.jsonl` for paper books) with the model and its **training
   cutoff**. The lab adds a check that fails when the test period starts before that cutoff.
 * Replies are cached by prompt, so reruns replay the same answers and cost nothing.
-* A reply that isn't valid JSON, or names stocks that aren't in the table, means no trade.
+* A reply that isn't valid JSON, has the wrong shape, or names stocks that aren't in the table, changes nothing: the book is left as it is and the report counts the unusable reply. Only an explicit empty list means "hold nothing".
 * AI strategies go through the same liquidity and position-trading rules as everything else.
 * `SILO_LLM=rulebot` is an offline stand-in used by tests. It is a fixed rule, not an AI.
 
@@ -356,3 +356,49 @@ silo learn list
 silo paper new learned-core --strategy learned --symbols-file uk.json \
     --params "$(silo learn params --strategy core_zones)"
 ```
+
+## Telling skill from luck (November 2026 review)
+
+A review of the whole project found that the scoreboard could not yet separate skill from luck, and
+that the AI books were momentum shortlists with noise added. These tools came out of it.
+
+**Fair controls**
+
+| Control | What it answers |
+|---|---|
+| Matched random twins (`silo league backtest --twins 20`, on by default) | Each contestant gets random twins that hold the same number of names, keep the same share of them at each decision and stay as invested, but pick at random from the shares that pass the liquidity rules. The report's **Beat twins** column is the share of twins the real book beat on Sharpe; below 95% is not distinguishable from luck. On made-up prices with no signal, books differ by 10 to 20 points over two years from fees and time in cash alone, which is why one random book is not enough. |
+| `shortlist_top`, `shortlist_random` | The AI desks only choose from the 30 shares with the best six-month return. These two see the same shortlist and size the same way with no model: the top 12 by momentum, and a random 12. An AI book has to beat both. |
+| Index tracker (`--tracker ISF.L`) | A fund you could really have bought, next to equal-weight buy-and-hold of today's list (which nobody could have picked in 2012). Fetch it once with `silo fetch ISF.L`. |
+| Cash interest (`--cash-interest`) | Idle cash earns Bank Rate (`silo fetch --macro` now stores it as `ctx:macro:bank_rate`), so a book that sits in cash is not marked down for it. Off by default. |
+| Project-wide count of attempts (`reports/trials.jsonl`) | Every lab study and league run is recorded, and the lab's luck test counts every earlier attempt on overlapping dates, not just one strategy's parameter grid. |
+
+**Scoring the signal, not only the book**
+
+```bash
+silo signals --start 2015-01-01                    # momentum, trend, low volatility...: do they rank next month's winners?
+silo signals --signal zone_score                   # the Core Strategy zone score (slow)
+silo events --strategy core_zones --by zone_score --cuts 8 9 --params '{"max_open_risk": 1.0}'
+```
+
+* `silo signals` ranks every share by a score each week and measures how well the rank lines up with
+  the next month's return (the information coefficient). It uses every share every week, so it needs
+  far less history than an equity curve to reach a verdict.
+* `silo events` measures what happened after each entry over fixed horizons, less the market over the
+  same days, whatever the exits and position sizes did. Grouped by zone score, this is the decisive
+  test of the Core Strategy entries.
+* The league report's **Picks vs the rest** column does the same for every contestant, AI included:
+  the names it asked for against the average share, over the weeks after each decision.
+
+**New contestants**
+
+| Contestant | What it is |
+|---|---|
+| `desk_v2`, `panel_v2` | The AI desk and panel with a repaired brief: numbers shown as percentiles within the list, no traded-value column, the trader must rank a fixed number of names, panel members name their best and worst eight. `desk` and `panel` are unchanged so their cached answers stay valid. |
+| `momentum_keep` | 12-1 momentum, top 15, that keeps a holding while it stays in the top 22. Same idea, fewer fees. |
+| `momentum_managed`, `sector_mom_managed` | The project's risk rules on a momentum book (`strategies/managed.py`): a stop three average daily ranges below entry, checked every day; half sold at twice the risk with the stop moved to entry; the rest trails. A momentum trade has no price target, so the "at least 1:4" entry test can't apply; the exits are the part that carries over. Compare with the unmanaged books before trusting it. |
+| `blend_equal` | A plain equal split of `momentum_keep` and `sector_mom`, with none of the adaptive blend's switching. |
+
+**Other fixes**: `sector_mom` and the news rules no longer wait for every share to have history
+(one late listing used to keep them in cash for years in long backtests); the liquidity rules now
+refuse a share whose close has not moved on more than 20% of the last 60 days (a stale price feed);
+`silo daily` prints any stale series it finds.

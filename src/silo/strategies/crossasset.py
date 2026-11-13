@@ -51,7 +51,8 @@ class SectorMomentum(_Monthly):
             c = view.close(s, lookback=self.lookback + 1)
             if len(c) > self.lookback:
                 rets[s] = float(c.iloc[-1 - self.skip] / c.iloc[0] - 1)
-        if len(rets) < len(self.symbols) or not self.new_month(view):
+        # trade once enough names have history; a late listing must not hold the book in cash
+        if len(rets) < min(len(self.symbols), self.n_sectors * self.per_sector) or not self.new_month(view):
             return None
         groups: dict[str, list[str]] = {}
         for s in rets:
