@@ -158,6 +158,9 @@ class RuleBot(LLMClient):
     model: str = "rulebot"
 
     def _ask(self, system: str, prompt: str) -> str:
+        if '"lessons"' in prompt:  # trade review: adopt the strongest statistical candidate, if any
+            m = re.search(r"^CANDIDATE (\{.*\})$", prompt, re.M)
+            return json.dumps({"lessons": [json.loads(m.group(1))] if m else []})
         rows = {}
         for line in prompt.splitlines():
             m = _NUM.match(line.strip())

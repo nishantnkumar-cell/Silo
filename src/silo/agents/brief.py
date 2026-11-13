@@ -34,9 +34,10 @@ def _labels(n: int) -> list[str]:
 
 @dataclass
 class Brief:
-    rows: dict[str, list[float]]  # symbol -> numbers in COLUMNS order
+    rows: dict[str, list[float]]  # symbol -> numbers in COLUMNS order (plus any extra columns)
     alias: dict[str, str]  # symbol -> label shown to the model
     market: str
+    header: str = HEADER
 
     @property
     def unalias(self) -> dict[str, str]:
@@ -44,7 +45,7 @@ class Brief:
 
     def table(self, symbols: list[str] | None = None) -> str:
         names = symbols or list(self.rows)
-        lines = [HEADER]
+        lines = [self.header]
         for s in names:
             v = self.rows[s]
             lines.append(f"{self.alias[s]} | " + " | ".join(f"{x:+.1f}" if i < 8 else f"{x:.1f}"
@@ -82,8 +83,14 @@ def build_brief(
     anonymize: bool = True,
     liquidity: Liquidity | None = Liquidity(),
     limit: int | None = None,
+    extra=None,
 ) -> Brief:
-    """Numbers for every symbol that has enough history (and passes liquidity)."""
+    """Numbers for every symbol that has enough history (and passes liquidity).
+
+    ``extra`` is an optional ``(header_suffix, fn(view, symbol) -> list[float])``
+    that appends columns, e.g. the supply-and-demand readings for agents that
+    follow the Core Strategy rulebook. Without it the brief is unchanged.
+    """
     rows = {}
     for s in symbols:
         if liquidity is not None and not liquidity.check(view, s)[0]:
@@ -97,6 +104,11 @@ def build_brief(
     order = sorted(symbols, key=lambda s: hashlib.sha256(s.encode()).hexdigest())
     alias = dict(zip(order, _labels(len(order)))) if anonymize else {s: s for s in symbols}
     alias = {s: alias[s] for s in rows}
+    header = HEADER
+    if extra is not None:
+        suffix, fn = extra
+        header = f"{HEADER} | {suffix}"
+        rows = {s: v + list(fn(view, s)) for s, v in rows.items()}
     if rows:
         m3 = np.mean([v[1] for v in rows.values()])
         above = np.mean([v[5] > 0 for v in rows.values()])
@@ -105,4 +117,4 @@ def build_brief(
                   f"{above:.0%} trade above their 200-day average; median volatility {vol:.0f}%.")
     else:
         market = "Market: no stocks have enough history yet."
-    return Brief(rows, alias, market)
+    return Brief(rows, alias, market, header)
