@@ -101,20 +101,20 @@ class Session:
             if weights is not None:
                 if self.strategy.uses_llm:
                     self.broker.charge(self.broker.costs.llm_cost_per_decision)
-                if all(s in self.last_close for s in weights):
-                    current = self.broker.weights(self.last_close)
-                    blocked = {}
-                    target = weights
-                    if self.constraints.liquidity:
-                        target, blocked = apply_liquidity(
-                            weights, current, view, self.equity[date], self.constraints.liquidity
-                        )
-                    final = apply_constraints(target, current, self.held_days, self.constraints)
-                    self.broker.target_weights(final, self.last_close, clock)
-                    decision = {"date": date, "clock": clock, "weights": dict(final), "proposed": dict(weights)}
-                    if blocked:
-                        decision["liquidity"] = blocked
-                    self.decisions.append(decision)
+                weights = {s: w for s, w in weights.items() if s in self.last_close}  # no price yet: can't trade
+                current = self.broker.weights(self.last_close)
+                blocked = {}
+                target = weights
+                if self.constraints.liquidity:
+                    target, blocked = apply_liquidity(
+                        weights, current, view, self.equity[date], self.constraints.liquidity
+                    )
+                final = apply_constraints(target, current, self.held_days, self.constraints)
+                self.broker.target_weights(final, self.last_close, clock)
+                decision = {"date": date, "clock": clock, "weights": dict(final), "proposed": dict(weights)}
+                if blocked:
+                    decision["liquidity"] = blocked
+                self.decisions.append(decision)
         self.last_date = date
         return {
             "date": date,

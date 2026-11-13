@@ -234,10 +234,54 @@ def cmd_paper(args) -> int:
     return 0
 
 
+def _league_backtest(args, vault) -> int:
+    import os
+
+    from silo.lab.league_backtest import run_league_backtest, write
+    from silo.league import AI_CONTESTANTS, RULE_CONTESTANTS
+    from silo.universe import UK_CANDIDATES
+
+    if args.symbols:
+        symbols = args.symbols
+    elif args.all_candidates:
+        symbols = [s for s in UK_CANDIDATES if vault.snapshots(s)]
+    else:
+        symbols = json.loads(Path(args.symbols_file).read_text())
+    tables = {s: vault.get_bars(s) for s in symbols}
+    symbols = [s for s in symbols if len(tables[s]) > 260]
+    names = args.only or (RULE_CONTESTANTS + (AI_CONTESTANTS if args.with_ai else []))
+    if any(REGISTRY[n].uses_llm for n in names):
+        if not os.environ.get("SILO_LLM"):
+            print("AI contestants need SILO_LLM (e.g. ollama:qwen2.5:7b)")
+            return 2
+        os.environ.setdefault("SILO_LLM_LOG", str(Path(args.out) / "llm"))  # shared cache: silo_agent reuses desk/panel
+    print(f"{len(names)} contestant(s) on {len(symbols)} symbols, {args.start or 'start'} to {args.end or 'end'}")
+    entries, bench = run_league_backtest(names, symbols, tables, args.start, args.end, **_rules(args, symbols))
+    page, data = write(entries, bench, args.out, args.title)
+    print(f"\nreport: {page}\ndata:   {data}\n{DISCLAIMER}")
+    return 0
+
+
+def cmd_check_data(args) -> int:
+    from silo.lab.league_backtest import data_check
+    from silo.universe import UK_CANDIDATES
+
+    vault = DataVault(args.data_dir)
+    symbols = args.symbols or [s for s in UK_CANDIDATES if vault.snapshots(s)]
+    table = data_check({s: vault.get_bars(s) for s in symbols})
+    with pd.option_context("display.max_rows", None, "display.width", 160):
+        print(table.to_string())
+    bad = list(table.index[table["suspect"].astype(bool)])
+    print(f"\n{len(bad)} suspect series: {' '.join(bad)}")
+    return 0
+
+
 def cmd_league(args) -> int:
     from silo.league import create_league
 
     vault = DataVault(args.data_dir)
+    if args.action == "backtest":
+        return _league_backtest(args, vault)
     symbols = args.symbols or json.loads(Path(args.symbols_file).read_text())
     rules = _rules(args, symbols)
     made = create_league(symbols, vault, args.paper_dir, args.prefix, args.with_ai, args.cash,
@@ -348,15 +392,27 @@ def main(argv: list[str] | None = None) -> int:
     pp.set_defaults(func=cmd_paper)
 
     lg = sub.add_parser("league", help="one paper book per contestant on the same universe")
-    lg.add_argument("action", choices=["new"])
+    lg.add_argument("action", choices=["new", "backtest"],
+                    help="new: start paper books; backtest: replay history for every contestant")
     lg.add_argument("--symbols", nargs="*")
     lg.add_argument("--symbols-file", default="uk.json", help="JSON list, e.g. from `silo universe uk --save`")
     lg.add_argument("--prefix", default="league")
     lg.add_argument("--with-ai", action="store_true", help="add desk, panel and silo_agent (needs SILO_LLM)")
     lg.add_argument("--cash", type=float, default=100_000.0)
     lg.add_argument("--paper-dir", default="paper")
+    lg.add_argument("--start", help="backtest: first date, e.g. 2012-01-01")
+    lg.add_argument("--end", help="backtest: last date")
+    lg.add_argument("--only", nargs="*", choices=list(REGISTRY), help="backtest: just these contestants")
+    lg.add_argument("--all-candidates", action="store_true",
+                    help="backtest: every UK candidate with data, instead of today's screened list (less look-ahead)")
+    lg.add_argument("--out", default="reports/league", help="backtest: folder for league.html and league.json")
+    lg.add_argument("--title", default="League backtest")
     _add_rule_flags(lg)
     lg.set_defaults(func=cmd_league)
+
+    cd = sub.add_parser("check-data", help="flag stale or broken price series in the vault")
+    cd.add_argument("symbols", nargs="*")
+    cd.set_defaults(func=cmd_check_data)
 
     dy = sub.add_parser("daily", help="fetch prices, advance every paper book, print the leaderboard")
     dy.add_argument("--paper-dir", default="paper")

@@ -22,6 +22,7 @@ class Constraints:
     max_turnover: float | None = None  # max sum |delta weight| per rebalance
     max_weight: float | None = None  # cap on any one position
     liquidity: Liquidity | None = None  # see silo.liquidity
+    rebalance_band: float = 0.0  # skip resizing a held name by less than this weight (cuts fee churn)
 
 
     @classmethod
@@ -29,7 +30,7 @@ class Constraints:
         """Weeks-to-months defaults: weekly decisions, 20-day minimum hold,
         at most 10% in one name, and the liquidity rules on."""
         base = dict(rebalance="weekly", min_hold_days=20, max_turnover=0.5, max_weight=0.1,
-                    liquidity=Liquidity())
+                    liquidity=Liquidity(), rebalance_band=0.02)
         base.update(overrides)
         return cls(**base)
 
@@ -60,6 +61,11 @@ def apply_constraints(
     for s in locked:  # a young position may grow but not shrink
         w[s] = max(w.get(s, 0.0), current[s])
 
+    if c.rebalance_band:  # a small resize of a name we keep isn't worth a fee
+        for s in list(w):
+            if current.get(s, 0) > 0 and w[s] > 0 and abs(w[s] - current[s]) < c.rebalance_band:
+                w[s] = current[s]
+
     total = sum(w.values())
     if total > 1.0:
         free = [s for s in w if s not in locked]
@@ -69,6 +75,13 @@ def apply_constraints(
             scale = max(0.0, (free_sum - excess) / free_sum)
             for s in free:
                 w[s] *= scale
+        total = sum(w.values())
+        if total > 1.0:  # young positions alone are over budget: limit how much they grow
+            base = sum(current[s] for s in locked) + sum(w[s] for s in free)
+            growth = sum(w[s] - current[s] for s in locked)
+            k = max(0.0, (1.0 - base) / growth) if growth > 0 else 0.0
+            for s in locked:
+                w[s] = current[s] + k * (w[s] - current[s])
 
     if c.max_turnover is not None:
         names = set(w) | set(current)
