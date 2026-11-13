@@ -46,10 +46,10 @@ class _PerSymbolSwitch(Strategy):
 class BuyAndHold(Strategy):
     """Buy every symbol in equal weights once, then hold.
 
-    It waits until every symbol has ``warmup`` bars of history, so the one
-    purchase is not refused by the liquidity rules (which need 60 days of
-    volume) and every symbol has started trading. A run that starts with that
-    history already in place buys on its first day, as before.
+    It buys the symbols that are trading at the start, once each has
+    ``warmup`` bars of history, so the purchase is not refused by the
+    liquidity rules (which need 60 days of volume). A run that starts with that
+    history already in place buys on its first day.
     """
 
     name = "buy_and_hold"
@@ -62,12 +62,17 @@ class BuyAndHold(Strategy):
         self.done = False
 
     def decide(self, view):
+        """Equal weights in every symbol that has a price at the start, then hold.
+
+        Symbols that list later are not added: that is what "buy and hold" means.
+        """
         if self.done:
             return None
-        if any(len(view.bars(s, lookback=self.warmup)) < self.warmup for s in self.symbols):
+        live = [s for s in self.symbols if len(view.bars(s, lookback=1))]
+        if not live or any(len(view.bars(s, lookback=self.warmup)) < self.warmup for s in live):
             return None
         self.done = True
-        return _equal(self.symbols, len(self.symbols))
+        return _equal(live, len(live))
 
 
 class SmaCross(_PerSymbolSwitch):
@@ -169,8 +174,8 @@ class Momentum12_1(Strategy):
             c = view.close(s, lookback=self.lookback + 1)
             if len(c) > self.lookback:
                 scores[s] = c.iloc[-1 - self.skip] / c.iloc[0] - 1
-        if len(scores) < len(self.symbols):
-            return None  # wait until every symbol has a full lookback
+        if len(scores) < self.top_k:
+            return None  # wait until enough symbols have a full lookback
         self.month = month
         winners = [s for s, v in sorted(scores.items(), key=lambda kv: -kv[1])[: self.top_k] if v > 0]
         return {s: 1.0 / self.top_k for s in winners}
@@ -215,10 +220,16 @@ class TrendQuality(Strategy):
 
     name = "uk_trend"
     param_grid = {"lookback": [126, 252], "top_k": [15, 25]}
+    buffer = 1.5  # a holding stays while it ranks in the top buffer x top_k (cuts churn and fees)
 
-    def __init__(self, symbols, lookback: int = 126, skip: int = 5, top_k: int = 20, trend: int = 200):
+    def __init__(self, symbols, lookback: int = 126, skip: int = 5, top_k: int = 20, trend: int = 200,
+                 buffer: float = 1.5):
         super().__init__(symbols)
         self.lookback, self.skip, self.top_k, self.trend = lookback, skip, top_k, trend
+        self.buffer = buffer
+
+    def reset(self) -> None:
+        self.held: list[str] = []
 
     def decide(self, view):
         need = max(self.lookback, self.trend) + 1
@@ -238,8 +249,13 @@ class TrendQuality(Strategy):
             if ret > 0:
                 scores[s], vols[s] = ret / vol, vol
         if not scores:
+            self.held = []
             return {}
-        winners = sorted(scores, key=lambda s: -scores[s])[: self.top_k]
+        ranked = sorted(scores, key=lambda s: -scores[s])
+        keep_zone = set(ranked[: int(self.top_k * self.buffer)])
+        winners = [s for s in getattr(self, "held", []) if s in keep_zone][: self.top_k]
+        winners += [s for s in ranked if s not in winners][: self.top_k - len(winners)]
+        self.held = winners
         inv = {s: 1 / vols[s] for s in winners}
         total = sum(inv.values())
         slots = len(winners) / self.top_k  # stay partly in cash when few names qualify

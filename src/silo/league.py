@@ -20,7 +20,8 @@ from silo.paper import PaperBook
 
 RULE_CONTESTANTS = ["uk_trend", "momentum", "blend", "random"]
 # The luck control rebalances about once a month into a random ~90% of names.
-PARAMS = {"random": {"decide_prob": 0.25, "exposure": 0.9}}
+# Momentum was written for short ETF lists (top 3); on ~100 shares it holds 15.
+PARAMS = {"random": {"decide_prob": 0.25, "exposure": 0.9}, "momentum": {"top_k": 15}}
 AI_CONTESTANTS = ["desk", "panel", "silo_agent"]
 # Daily-bar books (silver, crypto): rules that act on daily signals, plus a random control
 # that rebalances about every ten days.

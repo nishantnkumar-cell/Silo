@@ -158,6 +158,7 @@ def test_buy_and_hold_invests_when_the_run_starts_on_the_first_bar():
     tables["ETH-USD"] = late
     res = run_backtest(REGISTRY["buy_and_hold"](CRYPTO_PAIRS), tables, costs=CostModel.crypto(),
                        constraints=Constraints.daily_trading(liquidity=Liquidity.for_market("CRYPTO")))
-    assert set(res.fills["symbol"]) == {"BTC-USD", "ETH-USD"}
-    assert res.fills["date"].min() >= late.index[59]
+    # only what trades at the start is bought (a later listing is not added), once it has 60 bars
+    assert set(res.fills["symbol"]) == {"BTC-USD"}
+    assert res.fills["date"].min() > tables["BTC-USD"].index[59]
     assert res.equity.iloc[-1] != res.equity.iloc[0]
