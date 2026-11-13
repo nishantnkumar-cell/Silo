@@ -33,6 +33,8 @@ grpT = "Higher time frames"
 trendTf = input.timeframe("W", "Trend time frame", group = grpT)
 curveTf = input.timeframe("M", "Curve time frame", group = grpT)
 showCtrl = input.bool(true, "Plot the trend's controlling swing", group = grpT)
+showHtf  = input.bool(true, "Show the nearest curve-time-frame supply above and demand below", group = grpT,
+     tooltip = "Daily zones older than the lookback, or already broken, are not drawn. The monthly zones show where the bigger supply and demand sit.")
 
 grpP = "Trade plan (S.E.T.)"
 showPlan   = input.bool(true, "Show entry, stop and targets for the best setup", group = grpP)
@@ -266,7 +268,9 @@ f_curve(int mb, float bb) =>
     float lo = na
     float hi = na
     float supA = na
+    float supAD = na
     float demB = na
+    float demBD = na
     bool below = false
     bool above = false
     for z in zs
@@ -275,12 +279,16 @@ f_curve(int mb, float bb) =>
                 if z.strength() >= 1
                     below := true
                     lo := na(lo) ? z.dist : math.max(lo, z.dist)
-                demB := na(demB) ? z.prox : math.max(demB, z.prox)
+                if na(demB) or z.prox > demB
+                    demB := z.prox
+                    demBD := z.dist
             if not z.demand and z.prox >= close
                 if z.strength() >= 1
                     above := true
                     hi := na(hi) ? z.dist : math.min(hi, z.dist)
-                supA := na(supA) ? z.prox : math.min(supA, z.prox)
+                if na(supA) or z.prox < supA
+                    supA := z.prox
+                    supAD := z.dist
     float mn = low
     float mx = high
     int n = math.min(bar_index, 119)
@@ -293,7 +301,7 @@ f_curve(int mb, float bb) =>
     if na(hi) or not enough
         hi := mx
     bool known = below and above and enough
-    [lo[1], hi[1], known[1], supA[1], demB[1]]  // completed bars only
+    [lo[1], hi[1], known[1], supA[1], demB[1], supAD[1], demBD[1]]  // completed bars only
 
 // ---------------------------------------------------------------- scoring
 // Decision matrix (curve third x trend). 0 = no action, 1 = trade, 2 = trade only with 5:1.
@@ -352,7 +360,7 @@ f_px(float v) =>
 array<Zone> zones = f_detect(maxBase, lookback, baseBody)
 float atr14 = ta.sma(ta.tr(true), 14)
 [tDirRaw, tCtrl] = request.security(syminfo.tickerid, trendTf, f_trend(), lookahead = barmerge.lookahead_on)
-[cLo, cHi, cKnown, hSup, hDem] = request.security(syminfo.tickerid, curveTf, f_curve(maxBase, baseBody), lookahead = barmerge.lookahead_on)
+[cLo, cHi, cKnown, hSup, hDem, hSupD, hDemD] = request.security(syminfo.tickerid, curveTf, f_curve(maxBase, baseBody), lookahead = barmerge.lookahead_on)
 int tDir = nz(tDirRaw, 0)
 
 plot(showCtrl ? tCtrl : na, "Controlling swing (trend time frame)", color = color.new(color.gray, 30),
@@ -361,7 +369,7 @@ plot(showCtrl ? tCtrl : na, "Controlling swing (trend time frame)", color = colo
 var array<box>   boxes  = array.new<box>()
 var array<line>  lines  = array.new<line>()
 var array<label> labels = array.new<label>()
-var table info = table.new(position.top_right, 2, 6, bgcolor = color.new(color.black, 85), border_width = 1)
+var table info = table.new(position.top_right, 2, 7, bgcolor = color.new(color.black, 85), border_width = 1)
 
 f_planLine(float y, color c, int x1, int x2, string ls) =>
     line.new(x1, y, x2, y, color = c, width = 2, style = ls)
@@ -390,11 +398,17 @@ if barstate.islast
     float bestSopp = na
     float bestSrr = na
 
+    int nSup = 0
+    int nDem = 0
     for z in zones
         if z.valid
             [sc, st, tm, fr, trS, cvS, pzS, loc, stop, opp, rr, dec, fromHtf] = f_score(z, zones, price, buf, tDir, tCtrl, cLo, cHi, hSup, hDem)
             bool show = (z.demand ? showDemand : showSupply) and sc >= minShow
             if show
+                if z.demand
+                    nDem += 1
+                else
+                    nSup += 1
                 color zc = z.demand ? colDem : colSup
                 int tp = sc >= 8.5 ? 62 : sc >= 7 ? 76 : 88
                 string txt = z.fm + "  " + f_num(sc) + "/10" + (z.inZone ? "  in zone" : "")
@@ -476,3 +490,16 @@ if barstate.islast
     table.cell(info, 1, 4, not showShort ? "off" : na(bestS) ? "none qualifies" : bestS.fm + " " + f_num(bestSs) + "/10, 1:" + f_num(bestSrr), text_color = color.white, text_size = size.small)
     table.cell(info, 0, 5, "Min reward:risk", text_color = color.white, text_size = size.small)
     table.cell(info, 1, 5, "1:" + f_num(minRR) + ", half off at 1:" + f_num(halfRR), text_color = color.white, text_size = size.small)
+    table.cell(info, 0, 6, "Zones drawn", text_color = color.white, text_size = size.small)
+    table.cell(info, 1, 6, str.tostring(nDem) + " demand, " + str.tostring(nSup) + " supply" + (nSup == 0 and showSupply ? " (none unbroken in the last " + str.tostring(lookback) + " bars)" : ""), text_color = color.white, text_size = size.small)
+
+    // nearest higher-time-frame zones (the curve's edges and the fallback profit target)
+    if showHtf
+        if showSupply and not na(hSup) and hSup > price
+            boxes.push(box.new(bar_index - 60, math.max(hSup, hSupD), bar_index + extendBars, math.min(hSup, hSupD),
+                 border_color = colSup, border_style = line.style_dashed, bgcolor = color.new(colSup, 92),
+                 text = curveTf + " supply", text_size = size.small, text_color = colSup, text_halign = text.align_left))
+        if showDemand and not na(hDem) and hDem < price
+            boxes.push(box.new(bar_index - 60, math.max(hDem, hDemD), bar_index + extendBars, math.min(hDem, hDemD),
+                 border_color = colDem, border_style = line.style_dashed, bgcolor = color.new(colDem, 92),
+                 text = curveTf + " demand", text_size = size.small, text_color = colDem, text_halign = text.align_left))

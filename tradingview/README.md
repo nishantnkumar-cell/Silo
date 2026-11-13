@@ -30,6 +30,12 @@ checked against Silo's Python zone finder but not compiled inside TradingView.
 * **Box text**: formation (DBR, RBR, RBD, DBD), score out of 10, and "in zone" when price is
   inside it now. The second line is the breakdown: **S**trength 0-2, **T**ime 0-1,
   **F**reshness 0-2, **Tr**end 0-2, **C**urve 0-1, **P**rofit zone 0-2.
+* **Dashed boxes**: the nearest monthly supply above price and demand below it (the edges of
+  the "curve"). These show the bigger zones even when no daily supply is left.
+* **Why there may be no red boxes**: a supply zone is deleted once a daily close goes above its
+  top (distal) line, and only the last 260 daily bars are searched. A share that has rallied for
+  a year has broken every supply zone above it, so none are drawn; the table's "Zones drawn"
+  row says so. Raise "Keep zones from the last N bars" to look further back.
 * **Grey step line**: the weekly trend's controlling swing (the low that ends an uptrend if
   price closes below it).
 * **Table, top right**: weekly trend, where price sits in the monthly curve, and the best long
