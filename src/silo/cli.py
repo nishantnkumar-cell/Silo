@@ -226,6 +226,34 @@ def cmd_universe(args) -> int:
     return 0
 
 
+def cmd_zones(args) -> int:
+    """Today's supply and demand zones per stock, as an HTML page (research only)."""
+    from silo.lab.zones_report import write_zones_report, zone_row
+
+    if args.demo:
+        symbols, tables = _demo_tables()
+    else:
+        vault = DataVault(args.data_dir)
+        if args.all_candidates or not args.symbols:
+            from silo.universe import UK_CANDIDATES
+
+            symbols = [s for s in UK_CANDIDATES if vault.snapshots(s)]
+        else:
+            symbols = args.symbols
+        tables = {s: vault.get_bars(s) for s in symbols}
+    rows = [r for s in symbols if (r := zone_row(s, tables[s], min_reward_risk=args.min_rr)) is not None]
+    if not rows:
+        print("no stock has enough history (120+ days); run `silo fetch --universe uk` first")
+        return 1
+    out = Path(args.out)
+    write_zones_report(rows, out)
+    for r in rows:
+        sup = f"{r.supply[0]:.2f}-{r.supply[1]:.2f}" if r.supply else "none"
+        print(f"{r.symbol:10} {r.close:10.2f}  {r.verdict:18} next supply {sup:>18}  {r.detail}")
+    print(f"\n{sum(bool(r.supply) for r in rows)} of {len(rows)} have a supply zone above the price. Wrote {out}")
+    return 0
+
+
 def cmd_paper(args) -> int:
     from silo.paper import DISCLAIMER as PAPER_NOTE
     from silo.paper import PaperBook
@@ -685,6 +713,14 @@ def main(argv: list[str] | None = None) -> int:
     u.add_argument("--quality", action="store_true", help="also check today's fundamentals (live use only)")
     u.add_argument("--save", help="write passing symbols to this JSON file")
     u.set_defaults(func=cmd_universe)
+
+    zn = sub.add_parser("zones", help="today's supply and demand zones per stock, as an HTML page")
+    zn.add_argument("symbols", nargs="*")
+    zn.add_argument("--all-candidates", action="store_true", help="every UK candidate with cached data (default)")
+    zn.add_argument("--min-rr", type=float, default=4.0, help="reward:risk a buy needs to the next supply")
+    zn.add_argument("--out", default="reports/zones.html")
+    zn.add_argument("--demo", action="store_true", help="use synthetic data, offline")
+    zn.set_defaults(func=cmd_zones)
 
     pp = sub.add_parser("paper", help="forward paper trading on the simulator")
     pp.add_argument("action", choices=["new", "run", "status", "t212-map", "t212-check", "t212-fills"])

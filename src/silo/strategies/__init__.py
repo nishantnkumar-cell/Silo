@@ -10,7 +10,7 @@ from silo.strategies.classic import (
     TrendVolTarget,
     VolTarget,
 )
-from silo.strategies.core_zones import CoreZones, CoreZonesTrail
+from silo.strategies.core_zones import CoreManaged, CoreZones, CoreZonesTrail
 from silo.strategies.crossasset import MacroTilt, SectorMomentum
 from silo.strategies.news import DirectorBuys, NewsMomentum, ResultsDrift
 from silo.strategies.random_entry import RandomEntry
@@ -31,6 +31,7 @@ REGISTRY = {
     "tsmom": TrendVolTarget,
     "core_zones": CoreZones,
     "core_trail": CoreZonesTrail,
+    "core_managed": CoreManaged,
     "random": RandomEntry,
 }
 

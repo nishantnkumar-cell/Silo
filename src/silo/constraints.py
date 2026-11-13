@@ -23,6 +23,7 @@ class Constraints:
     max_weight: float | None = None  # cap on any one position
     liquidity: Liquidity | None = None  # see silo.liquidity
     rebalance_band: float = 0.0  # skip resizing a held name by less than this weight (cuts fee churn)
+    daily_exit_checks: bool = True  # let Strategy.manage sell on any daily close (stops, profit-taking)
 
 
     @classmethod

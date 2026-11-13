@@ -318,12 +318,17 @@ coded, and which rules can't be tested) and implemented three ways:
 |---|---|
 | `core_zones` | Rules only. Weekly: score every active daily demand zone out of 10 (strength, time, freshness, weekly trend, monthly curve, profit zone), apply the curve x trend decision table, buy when price is back at a zone that scores 7+ (8.5+ buys at the zone, 7-8 waits for confirmation). Stop 10% of a day's range below the zone, target 75% of the way to the next supply and at least 3x the risk; 2% risk per trade, 6% in total. |
 | `core_trail` | The same entries, no fixed target: the stop trails under each new demand zone. |
+| `core_managed` | Only 1:4 or better setups; checked every day: stop hit sells all, half sold at 1:2 with the stop moved to entry, the rest trails. |
 | `core_desk` | The AI debate desk with the rulebook in its prompts and six zone readings per stock. |
 
 ```bash
-silo league backtest --all-candidates --start 2012-01-01 --only core_zones core_trail momentum random --out reports/league-core
+silo league backtest --all-candidates --start 2012-01-01 --only core_zones core_trail core_managed momentum random --out reports/league-core
 silo lab --all-candidates --strategy core_zones --out reports/lab-core
+silo zones --out reports/zones.html
 ```
+
+`silo zones` shows today's demand and supply zones for every stock, with a verdict (in buy zone,
+wait for pull-back, supply too close, no trade), as `reports/zones.html` on the dashboard.
 
 ## Learning from past trades
 
