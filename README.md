@@ -167,6 +167,24 @@ silo web                                  # the dashboard lists every league boo
 powershell -ExecutionPolicy Bypass -File scripts\windows\install-daily-task.ps1 -Model ollama:qwen2.5:7b -Mirror league-silo_agent
 ```
 
+### Backtesting the whole league
+
+The paper league needs months to say anything, so replay history too:
+
+```powershell
+silo check-data                                         # flag stale or flat price series first
+silo league backtest --all-candidates --start 2012-01-01 --out reports\league-rules
+silo league backtest --all-candidates --with-ai --start 2024-10-01 --out reports\league-ai
+```
+
+Each run writes `league.html` (equity of every contestant, results table, results by market
+conditions) and `league.json`. AI contestants are labelled *after cutoff* or *before cutoff*: only
+runs that start after the model's training cutoff (qwen2.5: September 2024) are a fair test.
+`--all-candidates` uses every UK candidate and lets the engine's liquidity rules pick tradable names
+day by day, instead of today's screened list (which would leak today's knowledge into the past).
+Model answers are cached in the output folder, so `silo_agent` reuses the desk's and panel's answers
+and an interrupted run resumes where it stopped.
+
 Without `--with-ai` the league has only the rule-based books (`uk_trend`, `momentum`, `blend` and a
 random control), which need no model. Before mirroring, run `silo paper t212-map league-silo_agent`
 and check the ticker file.
