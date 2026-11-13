@@ -15,7 +15,12 @@ class LiveTradingRefused(RuntimeError):
 
 
 # The only remote order endpoints Silo may ever talk to: paper sandboxes.
-PAPER_HOSTS = frozenset({"paper-api.alpaca.markets"})
+PAPER_HOSTS = frozenset(
+    {
+        "paper-api.alpaca.markets",
+        "demo.trading212.com",  # Trading 212 Practice account (Invest / ISA demo)
+    }
+)
 
 # Known live order-routing hosts. Any match is refused outright.
 LIVE_HOSTS = frozenset(
@@ -31,11 +36,12 @@ LIVE_HOSTS = frozenset(
         "api.binance.com",
         "api.coinbase.com",
         "api.kraken.com",
+        "live.trading212.com",
     }
 )
 
 # Environment variables that suggest live credentials are present.
-_LIVE_ENV_MARKERS = ("LIVE_API_KEY", "LIVE_SECRET", "LIVE_TRADING")
+_LIVE_ENV_MARKERS = ("LIVE_API_KEY", "LIVE_SECRET", "LIVE_TRADING", "T212_LIVE")
 
 
 def check_order_endpoint(url: str) -> str:

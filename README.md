@@ -46,6 +46,33 @@ On synthetic random walks, the Bollinger fade beats buy-and-hold and 97% of
 random strategies, and even wins on the holdout, yet the deflated Sharpe test
 (0.77) still flags it as likely luck. That is the lab doing its job.
 
+## Phase 2: UK stocks and the paper loop
+
+Silo now targets **UK shares held for weeks to months**, and runs strategies
+forward on a paper book.
+
+| Part | File | What it does |
+| --- | --- | --- |
+| Market rules | `src/silo/markets.py` | London close (16:35 local, DST-aware) sets `available_at`; `.L` tickers are UK; a book cannot mix markets. |
+| UK prices | `src/silo/data/sources.py`, `data/vault.py` | Yahoo pence converted to pounds, isolated 100x rows repaired. Prices are split-adjusted but not dividend-adjusted; dividends are stored separately and paid as cash on the ex-date. |
+| Snapshots | `src/silo/data/vault.py` | Every fetch is a new dated snapshot; nothing is overwritten. `vault.revisions(symbol)` shows rows a vendor changed. |
+| UK costs | `src/silo/broker.py` | `CostModel.uk()`: 0.5% stamp duty on buys, £5 dealing fee, 20bp spread, 10bp slippage. Picked automatically for `.L` symbols. |
+| Position trading | `src/silo/constraints.py` | Default: decide weekly, hold new positions at least 20 trading days, trade at most 50% of the book per rebalance, cap any name at 10%. Enforced in code. |
+| Liquidity | `src/silo/liquidity.py` | Hard rules in the engine for every strategy: no penny stocks (under £1), at least £5m traded a day (60-day median), no position bigger than 20% of a day's trading so it can be sold within two days, and each simulated fill limited to 10% of that day's volume. A name that stops passing can be held or trimmed, never added to. |
+| Universe | `src/silo/universe/uk.py` | About 140 liquid FTSE 100 and FTSE 250 candidates. Price screen (point-in-time): at least £1 a share, £5m a day traded, 20% to 45% volatility, no 50% crash. Optional quality screen (ROE, margins, debt) from today's fundamentals, for picking the live universe only. |
+| Strategy | `uk_trend` in `strategies/classic.py` | Names above their 200-day average, ranked by risk-adjusted 6-month momentum, top 8, inverse-volatility sized. |
+| Market conditions | `src/silo/lab/regimes.py` | The lab report splits out-of-sample results into rising, sideways and falling markets, calm and stormy volatility, and the 2020 crash, 2020 rebound and 2022 rate shock, each next to buy-and-hold. |
+| Paper loop | `src/silo/paper.py` | Forward-only book on the simulator with a buy-and-hold shadow book, append-only journal, safe to rerun. Uses the same engine as backtests, so paper and backtest agree to the penny. |
+
+Reports now show round trips and average holding period.
+
+**Trading 212 Practice mirror** (`src/silo/brokers/trading212.py`): the
+simulator stays the source of truth; the newest rebalance can also be sent as
+market orders to a Trading 212 *Practice* account (`demo.trading212.com`).
+`live.trading212.com` is on the refused list, `T212_LIVE*` variables stop
+Silo from starting, every order is logged as an intent before it is sent so a
+rerun never duplicates it, and `t212-check` compares the two books.
+
 ## Quick start
 
 ```bash
@@ -53,6 +80,21 @@ python -m venv .venv && source .venv/bin/activate
 pip install -e '.[data,dev]'
 
 silo demo                                   # offline, synthetic data
+
+# UK workflow
+silo fetch --universe uk                    # ~70 London stocks, prices in pounds
+silo universe uk --quality --save uk.json   # liquid, healthy volatility, good fundamentals
+silo lab $(python -c "import json;print(' '.join(json.load(open('uk.json'))))") --strategy uk_trend
+silo paper new uk-trend --symbols-file uk.json --strategy uk_trend
+silo paper run uk-trend --fetch             # once a day after 16:35 London time
+silo paper status uk-trend
+
+# Optional: mirror the paper book to a Trading 212 Practice account (paper money)
+export T212_DEMO_API_KEY=... T212_DEMO_API_SECRET=...   # key created in Practice mode
+silo paper t212-map uk-trend                # propose Yahoo -> Trading 212 tickers; review the file
+silo paper run uk-trend --fetch --mirror t212
+silo paper t212-check uk-trend              # simulator vs Practice account weights
+
 silo fetch SPY QQQ IWM TLT GLD              # free daily bars from Yahoo
 silo backtest SPY QQQ IWM TLT GLD           # every baseline vs buy-and-hold
 silo backtest SPY --strategy sma_cross --start 2015-01-01
@@ -66,7 +108,6 @@ pytest
 
 ## Next phases
 
-2. Agent desk: analyst, debate and trader agents (local models plus Claude), amnesia test, cutoff tagging.
-3. Experiments: strategy evolution, regime router, synthetic sandbox, Kronos forecasts.
-4. Paper loop: daily paper runs, thesis journal, weekly review.
-5. Build our own agent from the best-scoring parts of other frameworks.
+3. Contestants: TradingAgents, AI-hedge-fund personas and Kronos adapted to UK stocks, all on the same paper account, every call logged.
+4. Own agent: score each part of each contestant, combine the best, Claude proposes and code disposes, run on paper.
+Later: amnesia test, synthetic sandbox and strategy evolution experiments.

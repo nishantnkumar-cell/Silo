@@ -32,6 +32,31 @@ def summarize(equity: pd.Series, fills: pd.DataFrame | None = None) -> dict[str,
         out["fills"] = float(len(fills))
         out["turnover_per_year"] = float(traded / equity.mean() / years) if years > 0 else 0.0
         out["fees"] = float(fills["fee"].sum())
+        trips, hold = holding_stats(fills, equity.index[-1])
+        out["round_trips"] = float(trips)
+        out["avg_hold_days"] = hold
     else:
         out["fills"] = 0.0
+        out["round_trips"] = 0.0
+        out["avg_hold_days"] = float("nan")
     return out
+
+
+def holding_stats(fills: pd.DataFrame, end: pd.Timestamp) -> tuple[int, float]:
+    """Completed round trips and mean calendar days each position was held.
+
+    A holding runs from the fill that opens a position to the fill that
+    closes it; positions still open at ``end`` count up to ``end``.
+    """
+    spells, opened, qty = [], {}, {}
+    for row in fills.sort_values("date").itertuples():
+        before = qty.get(row.symbol, 0.0)
+        after = before + row.qty
+        qty[row.symbol] = 0.0 if abs(after) < 1e-9 else after
+        if before <= 0 < qty[row.symbol]:
+            opened[row.symbol] = row.date
+        elif before > 0 and qty[row.symbol] == 0:
+            spells.append((row.date - opened.pop(row.symbol)).days)
+    trips = len(spells)
+    spells += [(pd.Timestamp(end) - d).days for d in opened.values()]
+    return trips, float(np.mean(spells)) if spells else float("nan")

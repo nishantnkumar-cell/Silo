@@ -6,6 +6,7 @@ from silo.strategies.classic import (
     Momentum12_1,
     Rsi2MeanReversion,
     SmaCross,
+    TrendQuality,
     VolTarget,
 )
 from silo.strategies.random_entry import RandomEntry
@@ -17,6 +18,7 @@ REGISTRY = {
     "rsi2": Rsi2MeanReversion,
     "bollinger": BollingerFade,
     "momentum": Momentum12_1,
+    "uk_trend": TrendQuality,
     "random": RandomEntry,
 }
 
@@ -30,5 +32,6 @@ __all__ = [
     "BollingerFade",
     "Momentum12_1",
     "VolTarget",
+    "TrendQuality",
     "RandomEntry",
 ]

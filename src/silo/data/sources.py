@@ -1,4 +1,10 @@
-"""Free data sources. Network sources are optional; synthetic data needs none."""
+"""Free data sources. Network sources are optional; synthetic data needs none.
+
+Prices are kept split-adjusted but NOT dividend-adjusted. Dividend
+adjustment rewrites past prices using dividends paid later, which leaks the
+future into a backtest; instead dividends are stored in their own column and
+credited as cash on the ex-date by the simulated broker.
+"""
 
 from __future__ import annotations
 
@@ -8,29 +14,44 @@ import urllib.request
 import numpy as np
 import pandas as pd
 
+from silo.data.vault import normalize_bars
+from silo.markets import market_for
+
 
 def fetch_yfinance(symbol: str, start: str = "2010-01-01") -> pd.DataFrame:
-    """Daily bars from Yahoo Finance via the optional ``yfinance`` package."""
+    """Daily bars from Yahoo Finance, normalized (pence converted for ``.L``)."""
     try:
         import yfinance as yf
     except ImportError as exc:  # pragma: no cover - depends on optional extra
         raise RuntimeError("install the data extra: pip install 'silo[data]'") from exc
-    df = yf.download(symbol, start=start, auto_adjust=True, progress=False, multi_level_index=False)
+    df = yf.download(
+        symbol, start=start, auto_adjust=False, actions=True, progress=False, multi_level_index=False
+    )
     if df.empty:
         raise RuntimeError(f"yfinance returned no data for {symbol}")
-    return df
+    market = market_for(symbol)
+    pence = market.code == "UK"
+    try:  # Yahoo reports GBp for most London listings; trust it when available
+        currency = yf.Ticker(symbol).fast_info.get("currency")
+        if currency:
+            pence = currency == "GBp"
+    except Exception:  # noqa: BLE001 - metadata is best-effort
+        pass
+    return normalize_bars(df.drop(columns=["Adj Close"], errors="ignore"), market, pence=pence)
 
 
 def fetch_stooq(symbol: str) -> pd.DataFrame:
-    """Daily bars from Stooq's free CSV endpoint (US tickers get a .us suffix)."""
-    code = symbol.lower() if "." in symbol else f"{symbol.lower()}.us"
+    """Daily bars from Stooq's free CSV endpoint (.us / .uk suffixes)."""
+    market = market_for(symbol)
+    base = symbol.lower()[:-2] if market.code == "UK" else symbol.lower()
+    code = base if "." in base else f"{base}.{'uk' if market.code == 'UK' else 'us'}"
     url = f"https://stooq.com/q/d/l/?s={code}&i=d"
     with urllib.request.urlopen(url, timeout=30) as resp:  # noqa: S310 - fixed https host
         text = resp.read().decode()
     df = pd.read_csv(io.StringIO(text), parse_dates=["Date"], index_col="Date")
     if df.empty:
         raise RuntimeError(f"stooq returned no data for {symbol}")
-    return df
+    return normalize_bars(df, market, pence=market.code == "UK")
 
 
 def synthetic_bars(

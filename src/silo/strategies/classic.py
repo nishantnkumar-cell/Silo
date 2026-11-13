@@ -188,3 +188,45 @@ class VolTarget(Strategy):
         realized = port.std(ddof=1) * np.sqrt(252)
         scale = min(1.0, self.target / realized) if realized > 0 else 1.0
         return {s: v * scale for s, v in self.base.items()}
+
+
+class TrendQuality(Strategy):
+    """Position-trading rule for a screened universe, held for weeks to months.
+
+    Ranks names that are above their 200-day average by risk-adjusted
+    6-month momentum (return divided by volatility, skipping the latest
+    week), holds the top ``top_k``, and sizes them by inverse volatility so a
+    jumpy stock does not dominate the book. Decides on rebalance days only.
+    """
+
+    name = "uk_trend"
+    param_grid = {"lookback": [126, 252], "top_k": [15, 25]}
+
+    def __init__(self, symbols, lookback: int = 126, skip: int = 5, top_k: int = 20, trend: int = 200):
+        super().__init__(symbols)
+        self.lookback, self.skip, self.top_k, self.trend = lookback, skip, top_k, trend
+
+    def decide(self, view):
+        need = max(self.lookback, self.trend) + 1
+        scores, vols = {}, {}
+        for s in self.symbols:
+            c = view.close(s, lookback=need)
+            if len(c) < need:
+                continue
+            if c.iloc[-1] <= c.iloc[-self.trend :].mean():
+                continue
+            window = c.iloc[-self.lookback - 1 : len(c) - self.skip]
+            r = window.pct_change().dropna()
+            vol = r.std(ddof=1) * np.sqrt(252)
+            if vol <= 0:
+                continue
+            ret = window.iloc[-1] / window.iloc[0] - 1
+            if ret > 0:
+                scores[s], vols[s] = ret / vol, vol
+        if not scores:
+            return {}
+        winners = sorted(scores, key=lambda s: -scores[s])[: self.top_k]
+        inv = {s: 1 / vols[s] for s in winners}
+        total = sum(inv.values())
+        slots = len(winners) / self.top_k  # stay partly in cash when few names qualify
+        return {s: slots * v / total for s, v in inv.items()}
