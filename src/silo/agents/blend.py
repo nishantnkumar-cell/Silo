@@ -36,9 +36,10 @@ class Blend(Strategy):
     name = "blend"
     param_grid = {"halflife": [8, 26]}
     default_members = ("uk_trend", "momentum", "donchian")
+    default_mode = "adaptive"  # "equal": a plain equal split, always invested, no chasing of recent winners
 
     def __init__(self, symbols, members=None, halflife: float = 13, warmup: int = 8,
-                 breadth_floor: float = 0.4, member_params: dict | None = None):
+                 breadth_floor: float = 0.4, member_params: dict | None = None, mode: str | None = None):
         super().__init__(symbols)
         from silo.strategies import REGISTRY  # late import: the registry includes this class
 
@@ -47,6 +48,9 @@ class Blend(Strategy):
         self.members = {n: REGISTRY[n](symbols, **params.get(n, {})) for n in names}
         self.uses_llm = any(m.uses_llm for m in self.members.values())
         self.halflife, self.warmup, self.breadth_floor = halflife, warmup, breadth_floor
+        self.mode = mode or self.default_mode
+        if self.mode not in ("adaptive", "equal"):
+            raise ValueError("mode must be 'adaptive' or 'equal'")
         self.reset()
 
     @property
@@ -104,6 +108,13 @@ class Blend(Strategy):
         self.last_prices = prices
         self._last_date = max(b.index[-1] for b in bars.values())
 
+        if getattr(self, "mode", "adaptive") == "equal":
+            self.last_alpha = alpha = {n: 1 / len(self.members) for n in self.members}
+            out: dict[str, float] = {}
+            for n, a in alpha.items():
+                for s, w in self.last_targets[n].items():
+                    out[s] = out.get(s, 0.0) + a * w
+            return {s: w for s, w in out.items() if w > 1e-6}
         if self.n_obs < self.warmup:
             alpha = {n: 1 / len(self.members) for n in self.members}
             exposure = 1.0
@@ -139,3 +150,17 @@ class SiloAgent(Blend):
     uses_llm = True
     param_grid: dict[str, list] = {}
     default_members = ("uk_trend", "momentum", "desk", "panel")
+
+
+class BlendEqual(Blend):
+    """A plain equal split between momentum (with a keep-zone) and sector momentum.
+
+    The adaptive blend lost its edge to whipsaw and fees: it chased whichever
+    member had just done well and halved the book on two triggers. This
+    version does neither. It holds only members that have beaten random picks.
+    """
+
+    name = "blend_equal"
+    param_grid: dict[str, list] = {}
+    default_members = ("momentum_keep", "sector_mom")
+    default_mode = "equal"

@@ -44,6 +44,7 @@ class LLMStrategy(Strategy):
     # default, and then prompts are byte-for-byte unchanged so cached answers stay valid.
     guidance: str = ""
     last_notes: dict | None = None
+    bad_replies: int = 0  # decisions skipped because the model's answer could not be used
 
     def __init__(self, symbols, client: LLMClient | None = None, anonymize: bool = True,
                  shortlist: int = 30, top_k: int = 12):
@@ -103,7 +104,13 @@ class DebateDesk(LLMStrategy):
         trade = self.ask("trader", "You are the trader. Weigh both researchers and choose what to hold.",
                          f"{table}\n\n{debate}\n\nReply as {{\"picks\": [up to {self.top_k} ids], "
                          "\"why\": \"<2 sentences>\"}. Fewer picks is fine if few look good.", clock)
-        picks = brief.to_symbols(trade.get("picks", []))
+        raw = trade.get("picks")
+        picks = brief.to_symbols(_ids(raw))
+        if not isinstance(raw, list) or (raw and not picks):
+            # Not an answer (no JSON, wrong shape, or names that aren't in the table): leave the
+            # book as it is. Only an explicit empty list means "hold nothing".
+            self.bad_replies += 1
+            return None
         self.last_notes = {"bull": brief.to_symbols(_ids(bull.get("names"))),
                            "bear": brief.to_symbols(_ids(bear.get("names"))),
                            "why": str(trade.get("why", ""))[:400]}
@@ -161,6 +168,9 @@ class StylePanel(LLMStrategy):
                     except (TypeError, ValueError):
                         pass
         mean = {s: float(np.mean(v)) for s, v in totals.items() if v}
+        if not mean:  # no style gave a usable answer: leave the book as it is
+            self.bad_replies += 1
+            return None
         picks = [s for s in sorted(mean, key=lambda s: -mean[s]) if mean[s] > 0]
         return self.weights_for(picks, brief)
 

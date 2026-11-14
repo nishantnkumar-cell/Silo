@@ -28,6 +28,7 @@ from silo.metrics import summarize
 from silo.strategies.base import Strategy
 
 FILL_COLUMNS = ["date", "decided_at", "symbol", "qty", "price", "fee"]
+BANK_RATE = "ctx:macro:bank_rate"
 
 
 @dataclass
@@ -39,6 +40,7 @@ class BacktestResult:
     fees_paid: float = 0.0
     dividends: float = 0.0
     dividend_events: list[dict] = field(default_factory=list)
+    interest: float = 0.0
 
     def metrics(self) -> dict[str, float]:
         return summarize(self.equity, self.fills)
@@ -64,6 +66,20 @@ class MarketData:
                 zip(df.index, zip(df["open"].to_numpy(), df["close"].to_numpy(), df["available_at"], div, vol))
             )
         self.dates = sorted(set().union(*(df.index for s, df in tables.items() if not is_context(s))))
+        rate = tables.get(BANK_RATE)
+        self._rate = None
+        if rate is not None and len(rate):
+            rate = rate.sort_values("available_at")
+            when = pd.DatetimeIndex(rate["available_at"]).tz_convert("UTC").as_unit("ns").asi8
+            self._rate = (when, rate["value"].to_numpy(dtype=float))
+
+    def cash_rate(self, clock: pd.Timestamp, fallback: float = 0.0) -> float:
+        """Bank Rate (% a year) public at ``clock``; ``fallback`` when no series is cached."""
+        if self._rate is None or clock is None:
+            return fallback
+        when, values = self._rate
+        i = int(when.searchsorted(pd.Timestamp(clock).tz_convert("UTC").as_unit("ns").value, side="right")) - 1
+        return float(values[i]) if i >= 0 else fallback
 
 
 @dataclass
@@ -72,6 +88,7 @@ class Session:
     broker: SimBroker
     constraints: Constraints = field(default_factory=Constraints)
     last_date: pd.Timestamp | None = None
+    last_clock: pd.Timestamp | None = None
     last_close: dict[str, float] = field(default_factory=dict)
     held_days: dict[str, int] = field(default_factory=dict)
     equity: dict[pd.Timestamp, float] = field(default_factory=dict)
@@ -91,6 +108,11 @@ class Session:
         today = {s: r[date] for s, r in data.rows.items() if date in r}
         n_fills = len(self.broker.fills)
         n_divs = len(self.broker.dividends)
+        costs = self.broker.costs
+        if costs.cash_interest and self.last_date is not None and self.broker.cash > 0:
+            # interest for the nights since the last trading day, at the rate known at that close
+            rate = data.cash_rate(self.last_clock, costs.cash_rate)
+            self.broker.credit_interest(self.broker.cash * rate / 100 * (date - self.last_date).days / 365)
         self.broker.credit_dividends({s: float(r[3]) for s, r in today.items() if r[3]}, date)
         volumes = {s: float(r[4]) for s, r in today.items()} if self.constraints.liquidity else None
         self.broker.fill_at_open({s: float(r[0]) for s, r in today.items()}, date, volumes)
@@ -150,6 +172,7 @@ class Session:
             decision = {"date": date, "clock": clock, "weights": final, "proposed": {}, "exits": dict(exits)}
             self.decisions.append(decision)
         self.last_date = date
+        self.last_clock = clock
         return {
             "date": date,
             "equity": self.equity[date],
@@ -189,6 +212,7 @@ class Session:
         return BacktestResult(
             self.strategy.name, pd.Series(self.equity, name="equity", dtype=float), fills,
             self.decisions, self.broker.fees_paid, divs, list(self.broker.dividends),
+            getattr(self.broker, "interest_earned", 0.0),
         )
 
 

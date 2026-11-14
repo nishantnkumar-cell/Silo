@@ -4,6 +4,7 @@ from silo.strategies.classic import (
     BuyAndHold,
     DonchianBreakout,
     Momentum12_1,
+    MomentumKeep,
     Rsi2MeanReversion,
     SmaCross,
     TrendQuality,
@@ -22,6 +23,7 @@ REGISTRY = {
     "rsi2": Rsi2MeanReversion,
     "bollinger": BollingerFade,
     "momentum": Momentum12_1,
+    "momentum_keep": MomentumKeep,
     "uk_trend": TrendQuality,
     "sector_mom": SectorMomentum,
     "macro_tilt": MacroTilt,
@@ -35,7 +37,10 @@ REGISTRY = {
     "random": RandomEntry,
 }
 
-from silo.agents.blend import Blend, SiloAgent  # noqa: E402 - these build members from REGISTRY
+from silo.agents.blend import Blend, BlendEqual, SiloAgent  # noqa: E402 - these build members from REGISTRY
+from silo.agents.controls import ShortlistRandom, ShortlistTop  # noqa: E402
+from silo.agents.v2 import DeskV2, PanelV2  # noqa: E402
+from silo.strategies.managed import Managed, MomentumManaged, SectorMomentumManaged  # noqa: E402
 from silo.agents.contestants import DebateDesk, StylePanel  # noqa: E402
 from silo.agents.informed import FullDesk, FullPanel, InformedDesk, InformedPanel, NewsDesk, NewsPanel  # noqa: E402
 from silo.agents.rulebook import CoreDesk  # noqa: E402
@@ -43,7 +48,10 @@ from silo.agents.rulebook import CoreDesk  # noqa: E402
 REGISTRY.update({"desk": DebateDesk, "panel": StylePanel, "blend": Blend, "silo_agent": SiloAgent,
                  "panel_macro": InformedPanel, "desk_macro": InformedDesk, "panel_news": NewsPanel,
                  "desk_news": NewsDesk, "panel_full": FullPanel, "desk_full": FullDesk,
-                 "core_desk": CoreDesk})
+                 "core_desk": CoreDesk, "desk_v2": DeskV2, "panel_v2": PanelV2,
+                 "shortlist_top": ShortlistTop, "shortlist_random": ShortlistRandom,
+                 "blend_equal": BlendEqual, "managed": Managed, "momentum_managed": MomentumManaged,
+                 "sector_mom_managed": SectorMomentumManaged})
 
 from silo.learning.lessons import Learned  # noqa: E402 - wraps any agent above with gated lessons
 

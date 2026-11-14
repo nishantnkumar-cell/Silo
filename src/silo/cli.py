@@ -21,7 +21,7 @@ from silo.strategies import REGISTRY
 
 DISCLAIMER = "Research only. Simulated results, not financial advice. Silo never trades real money."
 STUDY_STRATEGIES = [n for n in REGISTRY if n not in ("buy_and_hold", "random")]
-WRAPPERS = ("learned",)  # needs a base agent and lessons; left out of "all" runs
+WRAPPERS = ("learned", "managed")  # needs a base agent and lessons; left out of "all" runs
 AI_STRATEGIES = [n for n in REGISTRY if REGISTRY[n].uses_llm]
 
 
@@ -54,6 +54,8 @@ def _rules(args, symbols) -> dict:
              "crypto": CostModel.crypto(), "none": CostModel(0, 0, 0, 0, 0)}[args.costs]
     if getattr(args, "cost_scale", None):
         costs = costs.scaled(args.cost_scale)
+    if getattr(args, "cash_interest", False):
+        costs = replace(costs, cash_interest=True, cash_rate=getattr(args, "cash_rate", 0.0) or 0.0)
     liq_overrides = {k: v for k, v in {"min_price": args.min_price,
                                        "min_value_traded": args.min_value_traded}.items() if v is not None}
     if args.style == "daily":
@@ -84,6 +86,9 @@ def _add_rule_flags(p) -> None:
                         "for crypto, and adds the FX fee for US ETFs in daily books")
     p.add_argument("--cost-scale", type=float,
                    help="multiply every cost, e.g. 2 to check a result survives double the costs")
+    p.add_argument("--cash-interest", action="store_true",
+                   help="pay interest on idle cash at Bank Rate (needs `silo fetch --macro`), or at --cash-rate")
+    p.add_argument("--cash-rate", type=float, help="%% a year paid on cash when no Bank Rate series is cached")
     p.add_argument("--style", choices=["position", "daily", "any"], default="position",
                    help="position: weekly decisions, 20-day minimum hold, turnover and size caps; "
                         "daily: separate silver/crypto books deciding on each daily close")
@@ -189,11 +194,14 @@ def cmd_lab(args) -> int:
     else:
         names = [n for n in STUDY_STRATEGIES if n in _everything()]
     log = HoldoutLog(Path(args.out) / "holdout_log.jsonl")
+    from silo.lab.trials import TrialLog
+
+    trials = None if args.demo else TrialLog(args.trials)
     for name in names:
         result = run_study(
             REGISTRY[name], symbols, tables,
             holdout_frac=args.holdout, n_folds=args.folds, n_random=args.random,
-            open_holdout=args.open_holdout, holdout_log=log, **_rules(args, symbols),
+            open_holdout=args.open_holdout, holdout_log=log, trial_log=trials, **_rules(args, symbols),
             model_cutoff=getattr(REGISTRY[name](symbols), "model_cutoff", None) if name in AI_STRATEGIES else None,
         )
         path = write_report(result, Path(args.out) / f"{name}.html")
@@ -223,6 +231,86 @@ def cmd_universe(args) -> int:
     if args.save:
         Path(args.save).write_text(json.dumps(picked))
         print(f"saved to {args.save}")
+    return 0
+
+
+def _research_tables(args):
+    """(symbols, tables) for the signal reports: the demo set, given symbols, a file, or all UK candidates."""
+    if args.demo:
+        return _demo_tables()
+    vault = DataVault(args.data_dir)
+    if args.symbols:
+        symbols = args.symbols
+    elif args.symbols_file:
+        symbols = json.loads(Path(args.symbols_file).read_text())
+    else:
+        from silo.universe import UK_CANDIDATES
+
+        symbols = [s for s in UK_CANDIDATES if vault.snapshots(s)]
+    tables = vault.tables(symbols)
+    symbols = [s for s in symbols if len(tables[s]) > 260]
+    return symbols, tables
+
+
+def cmd_signals(args) -> int:
+    """Does a score rank next month's winners? Uses every share every week, so it needs far less history."""
+    from silo.lab.signal import SIGNALS, rank_ic
+    from silo.liquidity import Liquidity
+    from silo.markets import market_for_symbols
+
+    symbols, tables = _research_tables(args)
+    if len(symbols) < 20:
+        print("need at least 20 symbols with a year of history")
+        return 2
+    liq = None if args.demo else Liquidity.for_market(market_for_symbols(symbols).code)
+    names = args.signal or [n for n in SIGNALS if n != "zone_score"]
+    print(f"{len(symbols)} symbols, next {args.horizon} trading days, scored every {args.every} days"
+          f"{' from ' + args.start if args.start else ''}{' to ' + args.end if args.end else ''}\n")
+    print(f"{'signal':20s} {'weeks':>6s} {'mean IC':>8s} {'IC > 0':>7s} {'t':>6s} {'top-bottom fifth':>17s}")
+    rows = {}
+    for n in names:
+        r = rank_ic(SIGNALS[n], tables, symbols, args.horizon, args.every, args.start, args.end, liquidity=liq)
+        rows[n] = r
+        if not r.get("weeks"):
+            print(f"{n:20s} not enough data")
+            continue
+        print(f"{n:20s} {r['weeks']:6d} {r['mean_ic']:+8.3f} {r['ic_positive']:7.0%} {r['t']:6.1f} "
+              f"{r['top_minus_bottom']:+17.2%}")
+    if args.out:
+        Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.out).write_text(json.dumps(rows, indent=2))
+        print(f"\nsaved {args.out}")
+    print("\nIC is the rank correlation between the score and what each share did next. A mean of 0.03 to 0.05 "
+          "with t above 2 is a usable signal; near zero is noise. Returns are before costs.")
+    print(f"\n{DISCLAIMER}")
+    return 0
+
+
+def cmd_events(args) -> int:
+    """What happened after a strategy's entries, against the market, whatever the exits and sizing did."""
+    from silo.engine import run_backtest
+    from silo.lab.signal import event_study
+    from silo.learning.journal import build_journal
+
+    symbols, tables = _research_tables(args)
+    params = json.loads(args.params) if args.params else {}
+    res = run_backtest(REGISTRY[args.strategy](symbols, **params), tables, start=args.start, end=args.end,
+                       **_rules(args, symbols))
+    core = args.strategy.startswith("core") or args.by in ("zone_score", "reward_risk", "curve_pos")
+    trades = build_journal(res, tables, symbols, core=core)
+    rows = event_study(trades, tables, symbols, tuple(args.horizons), args.by, args.cuts)
+    print(f"{args.strategy}: {len(trades)} entries on {len(symbols)} symbols\n")
+    print(f"{'group':28s} {'days':>5s} {'entries':>8s} {'vs market':>10s} {'beat market':>12s} {'t':>6s}")
+    for r in rows:
+        print(f"{r['group']:28s} {r['horizon']:5d} {r['entries']:8d} {r['mean_excess']:+10.2%} "
+              f"{r['beat_market']:12.0%} {r['t']:6.1f}")
+    if args.out:
+        Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.out).write_text(json.dumps(rows, indent=2))
+        print(f"\nsaved {args.out}")
+    print("\nEach entry is measured from the open it filled at for a fixed number of days, less the average "
+          "share over the same days, before costs. t above 2 means the entries beat the market by more than luck.")
+    print(f"\n{DISCLAIMER}")
     return 0
 
 
@@ -355,8 +443,22 @@ def _league_backtest(args, vault) -> int:
             return 2
         os.environ.setdefault("SILO_LLM_LOG", str(Path(args.out) / "llm"))  # shared cache: silo_agent reuses desk/panel
     print(f"{len(names)} contestant(s) on {len(symbols)} symbols, {args.start or 'start'} to {args.end or 'end'}")
-    entries, bench = run_league_backtest(names, symbols, tables, args.start, args.end, **_rules(args, symbols))
+    if args.tracker and vault.snapshots(args.tracker):
+        tables[args.tracker] = vault.get_bars(args.tracker)
+    elif args.tracker:
+        print(f"no data for the tracker {args.tracker}; run `silo fetch {args.tracker}` to add that benchmark")
+    entries, bench = run_league_backtest(names, symbols, tables, args.start, args.end, twins=args.twins,
+                                         horizon=args.horizon, tracker=args.tracker, **_rules(args, symbols))
     page, data = write(entries, bench, args.out, args.title)
+    from silo.lab.stats import sharpe
+    from silo.lab.trials import TrialLog
+    from silo.league import PARAMS
+
+    trials = TrialLog(args.trials)
+    for e in entries:
+        if e.name != "random" and len(e.equity) > 2:
+            trials.record("league", e.name, PARAMS.get(e.name, {}), len(symbols), e.equity.index[0],
+                          e.equity.index[-1], sharpe(e.equity.pct_change()))
     print(f"\nreport: {page}\ndata:   {data}\n{DISCLAIMER}")
     return 0
 
@@ -417,6 +519,18 @@ def cmd_daily(args) -> int:
             failed += [f"macro:{n}" for n in fetch_all(vault, log=lambda m: None)]
         if failed:
             print(f"{len(failed)} symbol(s) not refreshed: {' '.join(failed)}")
+    try:  # stale or broken price series: these names are not bought until the feed recovers
+        from silo.lab.league_backtest import data_check
+        from silo.league import book_names
+        from silo.paper import PaperBook
+
+        held = sorted({x for n in book_names(args.paper_dir) for x in PaperBook(n, args.paper_dir).config()["symbols"]})
+        check = data_check({x: vault.get_bars(x) for x in held if vault.snapshots(x)}) if held else None
+        bad = [] if check is None else list(check.index[check["suspect"].astype(bool)])
+        if bad:
+            print(f"{len(bad)} price series look stale or broken (see `silo check-data`): {' '.join(bad)}")
+    except Exception as exc:  # noqa: BLE001 - a report only; never stop the daily run
+        print(f"data check skipped: {exc}")
     board = run_all(vault, args.paper_dir)
     path = write_leaderboard(board, args.paper_dir)
     print(f"\n{'book':26s} {'days':>5s} {'return':>8s} {'buy&hold':>9s} {'excess':>8s} {'names':>5s}")
@@ -700,6 +814,8 @@ def main(argv: list[str] | None = None) -> int:
     lab.add_argument("--holdout", type=float, default=0.2, help="fraction of data locked as the final holdout")
     lab.add_argument("--open-holdout", action="store_true", help="evaluate on the locked holdout (logged)")
     lab.add_argument("--out", default="reports")
+    lab.add_argument("--trials", default="reports/trials.jsonl",
+                     help="project-wide record of everything tried; the luck test counts earlier attempts")
     lab.add_argument("--demo", action="store_true", help="use synthetic data, offline")
     lab.add_argument("--universe", choices=["silver", "crypto"], help="study a daily-trading universe")
     lab.add_argument("--symbols-file", help="JSON list of symbols, e.g. from `silo universe uk --save`")
@@ -756,8 +872,44 @@ def main(argv: list[str] | None = None) -> int:
                     help="backtest: every UK candidate with data, instead of today's screened list (less look-ahead)")
     lg.add_argument("--out", default="reports/league", help="backtest: folder for league.html and league.json")
     lg.add_argument("--title", default="League backtest")
+    lg.add_argument("--twins", type=int, default=20,
+                    help="backtest: matched random twins per contestant for the luck check (0 to skip)")
+    lg.add_argument("--horizon", type=int, default=20,
+                    help="backtest: trading days ahead for the picks-versus-the-rest column")
+    lg.add_argument("--tracker", default="ISF.L",
+                    help="backtest: an index fund to show next to buy-and-hold, if its prices are cached")
+    lg.add_argument("--trials", default="reports/trials.jsonl", help="project-wide record of everything tried")
     _add_rule_flags(lg)
     lg.set_defaults(func=cmd_league)
+
+    sg = sub.add_parser("signals", help="does a score rank next month's winners? (rank correlation, every share every week)")
+    sg.add_argument("symbols", nargs="*")
+    sg.add_argument("--symbols-file")
+    sg.add_argument("--demo", action="store_true")
+    sg.add_argument("--signal", nargs="*", help="scores to test (default: all but the slow zone_score)")
+    sg.add_argument("--horizon", type=int, default=20)
+    sg.add_argument("--every", type=int, default=5, help="score every N trading days")
+    sg.add_argument("--start")
+    sg.add_argument("--end")
+    sg.add_argument("--out", help="save the numbers as JSON")
+    sg.add_argument("--data-dir", default="data")
+    sg.set_defaults(func=cmd_signals)
+
+    ev = sub.add_parser("events", help="what happened after a strategy's entries, against the market")
+    ev.add_argument("symbols", nargs="*")
+    ev.add_argument("--symbols-file")
+    ev.add_argument("--demo", action="store_true")
+    ev.add_argument("--strategy", choices=STUDY_STRATEGIES, default="core_zones")
+    ev.add_argument("--params", help="JSON settings for the strategy, e.g. '{\"max_open_risk\": 1.0}'")
+    ev.add_argument("--by", help="group entries by a number seen at entry, e.g. zone_score")
+    ev.add_argument("--cuts", nargs="*", type=float, help="group boundaries, e.g. 8 9")
+    ev.add_argument("--horizons", nargs="*", type=int, default=[20, 60])
+    ev.add_argument("--start")
+    ev.add_argument("--end")
+    ev.add_argument("--out", help="save the numbers as JSON")
+    ev.add_argument("--data-dir", default="data")
+    _add_rule_flags(ev)
+    ev.set_defaults(func=cmd_events)
 
     cd = sub.add_parser("check-data", help="flag stale or broken price series in the vault")
     cd.add_argument("symbols", nargs="*")

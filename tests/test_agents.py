@@ -87,7 +87,9 @@ def test_panel_combines_style_scores():
 
 def test_bad_model_reply_means_no_trades():
     syms, t = uk()
-    assert DebateDesk(syms, client=Scripted({})).decide(_view(t)) == {}
+    desk = DebateDesk(syms, client=Scripted({}))
+    assert desk.decide(_view(t)) is None  # no change to the book: an unusable answer must not sell it
+    assert desk.bad_replies == 1
     assert parse_json("Sure! {\"picks\": [\"A\"]} hope that helps") == {"picks": ["A"]}
     assert parse_json("no json") == {}
 
