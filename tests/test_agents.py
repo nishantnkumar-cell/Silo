@@ -160,3 +160,35 @@ def test_league_runs_every_book_and_ranks_them(tmp_path):
     assert len(board) == n_books and all(r["days"] == 40 for r in board)
     assert board == sorted(board, key=lambda r: -r["excess"])
     assert (tmp_path / "paper" / "league-desk" / "llm" / "calls.jsonl").exists()
+
+
+def test_ollama_retries_after_a_crash_then_succeeds(monkeypatch):
+    import io
+    import urllib.request
+
+    replies = [ConnectionResetError("reset"), OSError("500"), io.BytesIO(b'{"response": "{\\"ok\\": true}"}')]
+
+    class Resp:
+        def __init__(self, buf):
+            self.buf = buf
+
+        def __enter__(self):
+            return self.buf
+
+        def __exit__(self, *a):
+            return False
+
+    def fake(req, timeout):
+        r = replies.pop(0)
+        if isinstance(r, Exception):
+            raise r
+        return Resp(r)
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake)
+    waits = []
+    c = OllamaClient(model="qwen2.5:7b", _sleep=waits.append)
+    assert c.complete("s", "p") == '{"ok": true}'
+    assert waits == [15.0, 30.0]
+    replies[:] = [OSError("down")] * 5
+    with pytest.raises(LLMError, match="after 5 tries"):
+        OllamaClient(model="qwen2.5:7b", _sleep=lambda s: None).complete("s", "other")
