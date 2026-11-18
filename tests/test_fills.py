@@ -104,7 +104,8 @@ def test_gap_pairs_practice_with_simulator_fill(tmp_path):
     s = next(f for f in sim if f["symbol"] == by_ticker[o["ticker"]])
     practice_gbp = s["price"] * 1.001  # 10 bp worse than the simulator
     fake.history = [item(o["order_id"], o["ticker"], o["quantity"], practice_gbp * 100,
-                         fees=[("STAMP_DUTY_RESERVE_TAX", 0.005 * abs(o["quantity"]) * practice_gbp)])]
+                         fees=[("STAMP_DUTY_RESERVE_TAX", 0.005 * abs(o["quantity"]) * practice_gbp)],
+                         filled_at=(pd.Timestamp.now(tz="UTC") + pd.Timedelta(hours=1)).isoformat())]  # after the intent, whatever today is
     collect_fills(book, client(fake))
     gap = fill_gap(book)
     row = gap.iloc[0]
