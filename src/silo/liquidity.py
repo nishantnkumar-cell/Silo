@@ -13,7 +13,11 @@ universe screen a strategy could ignore):
    ``max_days_to_exit``, so it could be sold without being most of the
    market for days.
 
-All three are checked through the time firewall, at the decision clock.
+4. **Live prices.** If the close did not move on more than ``max_flat_days``
+   of the window, the feed is stale (a known problem with free data) and the
+   name is not bought until it recovers.
+
+All of these are checked through the time firewall, at the decision clock.
 A held name that stops passing may be held or trimmed, never added to.
 
 The simulated broker also caps each fill at ``max_participation`` of the
@@ -38,6 +42,7 @@ class Liquidity:
     window: int = 60
     max_participation: float = 0.10
     max_days_to_exit: float = 2.0
+    max_flat_days: float = 0.2  # more unchanged closes than this in the window: the price feed looks stale
 
     @classmethod
     def for_market(cls, code: str) -> Liquidity:
@@ -63,6 +68,10 @@ class Liquidity:
         cap = self.max_participation * value * self.max_days_to_exit
         if not price >= self.min_price:
             return False, cap, f"penny stock: price {price:.2f} below {self.min_price:.2f}"
+        closes = bars["close"].to_numpy(dtype=float)
+        flat = float(np.mean(np.diff(closes) == 0)) if len(closes) > 1 else 0.0
+        if self.max_flat_days is not None and flat > self.max_flat_days:
+            return False, cap, f"stale prices: the close did not change on {flat:.0%} of the last {self.window} days"
         if not value >= self.min_value_traded:
             return False, cap, f"illiquid: {value / 1e6:.1f}m a day traded, need {self.min_value_traded / 1e6:.1f}m"
         return True, cap, ""

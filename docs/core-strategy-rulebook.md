@@ -7,7 +7,7 @@ Sources: the *Core Strategy* course manual (5 days, 575 slides) and the *Profess
 Trader* course book (193 slides) from the same school. The forex book repeats the Core Strategy
 and adds forex-specific material. Neither book gives any statistics on how often its rules work.
 
-Code: `src/silo/strategies/core_zones.py` (rules strategy `core_zones` and `core_trail`),
+Code: `src/silo/strategies/core_zones.py` (rules strategies `core_zones`, `core_trail` and `core_managed`),
 `src/silo/agents/rulebook.py` (AI contestant `core_desk`), tests in `tests/test_core_zones.py`.
 
 ## The idea
@@ -31,7 +31,7 @@ into demand.
 | 6 | **Freshness** (0-2): untested = 2, tested up to half way into the zone = 1, deeper = 0. A close beyond the distal line **violates** the zone: drop it. | The current visit (the trade being planned) does not count as a test. |
 | 7 | **Trend** (0-2), on a higher time frame: with the trend = 2, sideways = 1, against = 0. Uptrend = higher lows and higher highs; it starts when price breaks the last swing high after a higher low, the latest swing low becomes the *controlling* low on each new break, and a break below the controlling low ends it. Buy demand above the controlling low. | Weekly bars; swings need 2 bars either side; breaks judged on closes. |
 | 8 | **Curve** (0-1), on the highest time frame: find the nearest quality demand below and supply above, split the range distal-to-distal into thirds. Demand in the low third = 1, middle = 0.5, top = 0. | Monthly bars, completed months only. With too little history the range is estimated from highs and lows and the setup is flagged. |
-| 9 | **Profit zone** (0-2): distance to the next opposing zone over the risk. At least 5:1 = 2, at least 3:1 = 1, less = 0. | Next daily supply above; if none, the monthly supply; if none at all, scored 2 ("let profits run"). |
+| 9 | **Profit zone** (0-2): distance to the next opposing zone over the risk. At least 5:1 = 2, at least 3:1 = 1, less = 0. | Next daily supply above; if none, the monthly supply; if none at all, scored 2 ("let profits run"). A supply zone that price has already wicked through (past its far line) is used up and doesn't count. |
 | 10 | Total out of 10. 8.5+ = enter at the proximal line (limit order). 7-8 = wait for confirmation (price back out of the zone). Below 7 = no trade. | `min_score` 7 or 8.5 is chosen by walk-forward. |
 | 11 | **Decision matrix** (curve x trend). Long only when: low on the curve (in a downtrend only with 5:1), middle with a sideways or up trend, high only in an uptrend with 5:1. Otherwise no action. | `decision_matrix` |
 | 12 | Time frames for trades lasting weeks to months ("monthly income"): monthly for the curve, weekly for the trend, daily for zones. | as stated |
@@ -39,6 +39,23 @@ into demand.
 | 14 | **Target** before the next opposing zone, at 75% of the profit zone, and at least 3x the risk. Or manage the trade with a **trailing stop** under each new demand zone and let profits run. | `core_zones` uses the target; `core_trail` trails. |
 | 15 | **Size**: risk at most 2% of the account per trade and 6% across open trades; no more than 50% of the account in one position. | Also Silo's 10% cap per name. |
 | 16 | Always have a stop; never add to a losing trade; don't overtrade. | Built in: one entry per stock, no averaging down. |
+
+## Trade management (`core_managed`)
+
+The project owner's rules for managing every trade, added after the first backtests:
+
+| Rule | In code |
+|---|---|
+| Reward-to-risk at least 1:4 | Entry only when 75% of the way to the next supply zone is at least 4x the risk (no supply overhead also passes). |
+| Check every open trade every day | `Strategy.manage` runs at every daily close, also between weekly decisions. |
+| Stop hit: sell | A daily close at or below the stop sells the whole position at the next open, even inside the 20-day minimum hold. |
+| At 1:2, sell half | The first day the high reaches entry + 2x risk, half is sold at the next open. The stop then moves up to the entry price (our addition, `breakeven=True`), so the rest cannot turn into a loss. |
+| The rest trails | The stop is raised under each new demand zone that forms (the manual's trailing stop) until it is hit. |
+
+In the engine, these sells are recorded as decisions with an `exits` field, so the paper loop and
+the Trading 212 Practice mirror send them like any other order. Silo still has no resting stop
+or limit orders: a stop is seen at the close and filled at the next open, so a gap down fills
+below the stop. `Constraints(daily_exit_checks=False)` turns the daily check off for comparison.
 
 ## What Silo cannot do the way the manual says (and the effect)
 

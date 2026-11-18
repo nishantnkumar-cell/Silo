@@ -52,6 +52,7 @@ class Entry:
     cutoff: str | None = None
     status: str = "rules"  # rules | clean | contaminated
     extra: dict = field(default_factory=dict)
+    tracker: Entry | None = None  # on the benchmark entry: an index fund over the same dates
 
 
 def _clients(strategy):
@@ -61,7 +62,8 @@ def _clients(strategy):
     return [a.client for a in out if isinstance(a, LLMStrategy) and a.client is not None]
 
 
-def run_one(name, symbols, data: MarketData, start, end, costs, constraints, progress=print) -> Entry:
+def run_one(name, symbols, data: MarketData, start, end, costs, constraints, progress=print,
+            twins: int = 0, horizon: int = 20) -> Entry:
     strat = REGISTRY[name](symbols, **PARAMS.get(name, {}))
     session = Session.start(strat, 100_000.0, costs, constraints)
     lo = None if start is None else pd.Timestamp(start)
@@ -82,22 +84,58 @@ def run_one(name, symbols, data: MarketData, start, end, costs, constraints, pro
         status = "clean" if clean else "contaminated"
         if cutoff is None:  # the offline rulebot has no cutoff and is not an AI
             status = "rulebot"
+    extra = {"fees": res.fees_paid, "dividends": res.dividends, "interest": res.interest,
+             "bad_replies": sum(getattr(a, "bad_replies", 0) for a in [strat, *getattr(strat, "members", {}).values()])}
+    elapsed = time.time() - t0  # the book itself; twins are timed apart
+    if name != "buy_and_hold":
+        from silo.lab.signal import pick_spread
+
+        extra["picks"] = pick_spread(res.decisions, data.tables, symbols, horizon)
+        w = pd.Series({d["date"]: sum(d["weights"].values()) for d in res.decisions}, dtype=float)
+        extra["avg_invested"] = float(w.reindex(res.equity.index).ffill().fillna(0.0).mean()) if len(w) else 0.0
+    if twins and name not in ("buy_and_hold", "random"):
+        from silo.lab.twins import run_twins
+
+        tw = run_twins(res.decisions, res.equity, symbols, data, days, costs, constraints, twins)
+        if tw is not None:
+            extra["twins"] = tw.to_dict()
+            if progress:
+                progress(f"  {name}: beat {tw.sharpe_percentile:.0%} of {tw.n} matched random twins "
+                         f"(twin median return {tw.median_return:.1%})")
     return Entry(
-        name, res.equity, res.fills, summarize(res.equity, res.fills), [], time.time() - t0,
-        sum(c.calls for c in clients), sum(c.cache_hits for c in clients), cutoff, status,
-        {"fees": res.fees_paid, "dividends": res.dividends},
+        name, res.equity, res.fills, summarize(res.equity, res.fills), [], elapsed,
+        sum(c.calls for c in clients), sum(c.cache_hits for c in clients), cutoff, status, extra,
     )
 
 
+def tracker_entry(symbol: str, table: pd.DataFrame, start, end, costs, like: pd.Series) -> Entry | None:
+    """A fund you could really have bought (an index tracker), bought once and held, dividends as cash."""
+    from silo.strategies.classic import BuyAndHold
+
+    data = MarketData({symbol: table})
+    session = Session.start(BuyAndHold([symbol]), 100_000.0, costs, None)
+    for d in data.dates:
+        if like.index[0] <= d <= like.index[-1]:
+            session.step(d, data)
+    res = session.result()
+    if len(res.equity) < 3 or res.fills.empty:
+        return None
+    return Entry(f"tracker {symbol}", res.equity, res.fills, summarize(res.equity, res.fills), [], 0.0,
+                 extra={"fees": res.fees_paid, "dividends": res.dividends, "interest": res.interest})
+
+
 def run_league_backtest(names, symbols, tables, start=None, end=None, costs=None, constraints=None,
-                        progress=print) -> tuple[list[Entry], Entry]:
+                        progress=print, twins: int = 0, horizon: int = 20, tracker: str | None = None,
+                        ) -> tuple[list[Entry], Entry]:
     data = MarketData({s: tables[s] for s in symbols} | {k: v for k, v in tables.items() if is_context(k)})
     bench = run_one("buy_and_hold", symbols, data, start, end, costs, None, progress)
+    if tracker and tracker in tables:
+        bench.tracker = tracker_entry(tracker, tables[tracker], start, end, costs, bench.equity)
     entries = []
     for n in names:
         if progress:
             progress(f"running {n}...")
-        e = run_one(n, symbols, data, start, end, costs, constraints, progress)
+        e = run_one(n, symbols, data, start, end, costs, constraints, progress, twins, horizon)
         e.regimes = regime_table(e.equity, bench.equity)
         entries.append(e)
         if progress:
@@ -112,7 +150,10 @@ def to_json(entries, bench) -> dict:
         return {"name": e.name, "metrics": e.metrics, "regimes": e.regimes, "seconds": e.seconds,
                 "llm_calls": e.llm_calls, "cache_hits": e.cache_hits, "cutoff": e.cutoff, "status": e.status,
                 **e.extra, "start": str(e.equity.index[0].date()), "end": str(e.equity.index[-1].date())}
-    return {"benchmark": row(bench), "contestants": [row(e) for e in entries], "disclaimer": DISCLAIMER}
+    out = {"benchmark": row(bench), "contestants": [row(e) for e in entries], "disclaimer": DISCLAIMER}
+    if bench.tracker is not None:
+        out["tracker"] = row(bench.tracker)
+    return out
 
 
 COLORS = ["#2a78d6", "#d6862a", "#2aa876", "#c2449a", "#7a5cd6", "#c9a227", "#38a3c4", "#d64545"]
@@ -121,6 +162,8 @@ COLORS = ["#2a78d6", "#d6862a", "#2aa876", "#c2449a", "#7a5cd6", "#c9a227", "#38
 def _svg(entries, bench, w=900, h=320) -> str:
     series = [("Buy-and-hold", bench.equity, "var(--ink-2)")] + [
         (e.name, e.equity, COLORS[i % len(COLORS)]) for i, e in enumerate(entries)]
+    if bench.tracker is not None:
+        series.insert(1, (bench.tracker.name, bench.tracker.equity, "var(--ink)"))
     idx = bench.equity.index
     vals = [100 * s.reindex(idx).ffill() / s.reindex(idx).ffill().iloc[0] for _, s, _ in series]
     lo = min(float(np.nanmin(v)) for v in vals)
@@ -130,7 +173,8 @@ def _svg(entries, bench, w=900, h=320) -> str:
     for (name, _, col), v in zip(series, vals):
         pts = " ".join(f"{i / (len(idx) - 1) * w:.1f},{h - (x - lo) / (hi - lo + 1e-9) * h:.1f}"
                        for i, x in list(enumerate(v.to_numpy()))[::step] if not np.isnan(x))
-        dash = ' stroke-dasharray="5 4"' if name == "Buy-and-hold" else ""
+        dash = ' stroke-dasharray="5 4"' if name == "Buy-and-hold" else (
+            ' stroke-dasharray="2 3"' if name.startswith("tracker ") else "")
         paths.append(f'<polyline fill="none" stroke="{col}" stroke-width="1.6"{dash} points="{pts}">'
                      f"<title>{html.escape(name)}</title></polyline>")
     legend = "".join(f'<span><i style="background:{c}"></i>{html.escape(n)}</span>' for n, _, c in series)
@@ -146,20 +190,40 @@ def _pct(x):
 def render(entries, bench, title="League backtest") -> str:
     b = bench.metrics
     head = ("<tr><th scope='col'>Contestant</th><th scope='col'>Total return</th><th scope='col'>CAGR</th>"
-            "<th scope='col'>Sharpe</th><th scope='col'>Max drawdown</th><th scope='col'>Round trips</th>"
-            "<th scope='col'>Avg hold (days)</th><th scope='col'>Model calls</th><th scope='col'>AI test</th></tr>")
-    rows = [f"<tr><th scope='row'>Buy-and-hold</th><td>{_pct(b['total_return'])}</td><td>{_pct(b['cagr'])}</td>"
-            f"<td>{b['sharpe']:.2f}</td><td>{_pct(b['max_drawdown'])}</td><td></td><td></td><td></td><td></td></tr>"]
+            "<th scope='col'>Sharpe</th><th scope='col'>Max drawdown</th><th scope='col'>Fees</th>"
+            "<th scope='col'>Avg invested</th><th scope='col'>Round trips</th>"
+            "<th scope='col'>Avg hold (days)</th><th scope='col'>Beat twins</th>"
+            "<th scope='col'>Picks vs the rest</th><th scope='col'>Model calls</th><th scope='col'>AI test</th></tr>")
+
+    def plain(label, e):
+        m = e.metrics
+        return (f"<tr><th scope='row'>{html.escape(label)}</th><td>{_pct(m['total_return'])}</td>"
+                f"<td>{_pct(m['cagr'])}</td><td>{m['sharpe']:.2f}</td><td>{_pct(m['max_drawdown'])}</td>"
+                f"<td>{e.extra.get('fees', 0):,.0f}</td>" + "<td></td>" * 7 + "</tr>")
+
+    rows = [plain("Buy-and-hold (equal weight, today's list)", bench)]
+    if bench.tracker is not None:
+        rows.append(plain(f"Index {bench.tracker.name} (a fund you could have bought)", bench.tracker))
     label = {"rules": "no model", "clean": "after cutoff", "contaminated": "before cutoff: treat with caution",
              "rulebot": "offline stand-in"}
     for e in sorted(entries, key=lambda e: -e.metrics.get("sharpe", 0)):
         m = e.metrics
         cls = " class='warn'" if e.status == "contaminated" else ""
+        tw, pk = e.extra.get("twins"), e.extra.get("picks") or {}
+        twin = "" if not tw else f"{tw['sharpe_percentile']:.0%} of {tw['n']}"
+        tcls = "" if not tw else (" class='pos'" if tw["sharpe_percentile"] >= 0.95 else " class='neg'")
+        spread = ""
+        if pk.get("decisions"):
+            t = pk.get("t", float("nan"))
+            spread = f"{pk['mean_spread']:+.2%} (t {t:.1f}, {pk['decisions']} decisions)"
+        bad = e.extra.get("bad_replies") or 0
         rows.append(f"<tr{cls}><th scope='row'>{html.escape(e.name)}</th><td>{_pct(m['total_return'])}</td>"
                     f"<td>{_pct(m['cagr'])}</td><td>{m['sharpe']:.2f}</td><td>{_pct(m['max_drawdown'])}</td>"
+                    f"<td>{e.extra.get('fees', 0):,.0f}</td><td>{_pct(e.extra.get('avg_invested'))}</td>"
                     f"<td>{m.get('round_trips', 0):.0f}</td><td>{m.get('avg_hold_days', 0):.0f}</td>"
-                    f"<td>{e.llm_calls + e.cache_hits or ''}</td><td>{label[e.status]}"
-                    f"{' (' + html.escape(e.cutoff) + ')' if e.cutoff else ''}</td></tr>")
+                    f"<td{tcls}>{twin}</td><td>{spread}</td>"
+                    f"<td>{e.llm_calls + e.cache_hits or ''}{f' ({bad} unusable)' if bad else ''}</td>"
+                    f"<td>{label[e.status]}{' (' + html.escape(e.cutoff) + ')' if e.cutoff else ''}</td></tr>")
     states = [r["state"] for r in (entries[0].regimes if entries else [])]
     rhead = "<tr><th scope='col'>Market state</th><th scope='col'>Days</th><th scope='col'>Buy-and-hold</th>" + "".join(
         f"<th scope='col'>{html.escape(e.name)}</th>" for e in entries) + "</tr>"
@@ -195,6 +259,11 @@ svg {{ width:100%; height:auto; border:1px solid var(--line); border-radius:6px 
 liquidity rules and position-trading rules. {DISCLAIMER}</p>
 <h2>Equity</h2>{_svg(entries, bench)}
 <h2>Results</h2><div class="scroll"><table><thead>{head}</thead><tbody>{''.join(rows)}</tbody></table></div>
+<p class="muted"><b>Beat twins</b>: the share of matched random books this one beat on Sharpe. A twin holds the same
+number of names, keeps the same share of them at each decision and stays as invested, but picks at random from the
+shares that pass the liquidity rules. Below 95% is not distinguishable from luck. <b>Picks vs the rest</b>: after each
+decision, the average return of the names the contestant asked for over the following weeks, less the average of
+every share, before costs; t above 2 is a sign of a real signal.</p>
 <p class="muted">Sorted by Sharpe ratio. Highlighted rows are AI results from before the model's training
 cutoff: the model may remember what happened, so they are not a fair test.</p>
 <h2>By market conditions</h2>

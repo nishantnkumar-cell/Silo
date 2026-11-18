@@ -70,6 +70,7 @@ def run_study(
     open_holdout: bool = False,
     holdout_log: HoldoutLog | None = None,
     model_cutoff: str | None = None,
+    trial_log=None,
     **kwargs,
 ) -> LabResult:
     dates = sorted(set().union(*(tables[s].index for s in symbols)))
@@ -88,6 +89,13 @@ def run_study(
     random_srs = [sharpe(r.equity.pct_change()) for r in randoms]
     pct = float(np.mean([sr > x for x in random_srs])) if random_srs else float("nan")
     bench_sr = sharpe(bench.equity.pct_change())
+    # Luck test: count this study's parameter trials and every earlier attempt on overlapping dates.
+    trials = list(wf.trial_sharpes)
+    if trial_log is not None:
+        key = trial_log.key(wf.strategy, {}, len(symbols), oos_start, oos_end)
+        trials += trial_log.overlapping(oos_start, oos_end, exclude_key=key)
+        trial_log.record("lab", wf.strategy, {}, len(symbols), oos_start, oos_end, sr)
+    n_counted = len(trials)
     result = LabResult(
         strategy=wf.strategy,
         symbols=list(symbols),
@@ -95,7 +103,7 @@ def run_study(
         benchmark=bench,
         randoms=randoms,
         holdout_start=holdout_start,
-        dsr=deflated_sharpe(oos, wf.trial_sharpes),
+        dsr=deflated_sharpe(oos, trials),
         sharpe_ci=bootstrap_sharpe_ci(oos, periods=periods_per_year(oos.index)),
         random_percentile=pct,
         model_cutoff=model_cutoff,
@@ -110,7 +118,9 @@ def run_study(
         Check(
             "Survives the deflated Sharpe test",
             result.dsr >= 0.95,
-            f"DSR {result.dsr:.2f} after {wf.n_trials} parameter trials (needs 0.95)",
+            f"DSR {result.dsr:.2f} after {wf.n_trials} parameter trials"
+            + (f" and {n_counted - wf.n_trials} earlier attempts on these dates" if n_counted > wf.n_trials else "")
+            + " (needs 0.95)",
         ),
         Check(
             "Beats 95% of random strategies with the same activity",

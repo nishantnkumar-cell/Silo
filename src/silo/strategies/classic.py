@@ -153,17 +153,23 @@ class BollingerFade(_PerSymbolSwitch):
 
 
 class Momentum12_1(Strategy):
-    """Monthly: hold the top-k symbols by 12-month return, skipping the last month."""
+    """Monthly: hold the top-k symbols by 12-month return, skipping the last month.
+
+    ``buffer`` above 1 keeps a holding while it still ranks in the top
+    ``buffer`` x ``top_k``, so a name that slips from 15th to 17th isn't sold
+    and bought back: the same idea, far fewer fees.
+    """
 
     name = "momentum"
-    param_grid = {"lookback": [126, 252], "top_k": [1, 2]}
+    param_grid = {"lookback": [126, 252], "top_k": [3, 15]}
 
-    def __init__(self, symbols, lookback: int = 252, skip: int = 21, top_k: int = 3):
+    def __init__(self, symbols, lookback: int = 252, skip: int = 21, top_k: int = 3, buffer: float = 1.0):
         super().__init__(symbols)
-        self.lookback, self.skip, self.top_k = lookback, skip, top_k
+        self.lookback, self.skip, self.top_k, self.buffer = lookback, skip, top_k, buffer
 
     def reset(self) -> None:
         self.month = None
+        self.held: list[str] = []
 
     def decide(self, view):
         month = view.clock.tz_convert(None).to_period("M")
@@ -177,8 +183,25 @@ class Momentum12_1(Strategy):
         if len(scores) < self.top_k:
             return None  # wait until enough symbols have a full lookback
         self.month = month
-        winners = [s for s, v in sorted(scores.items(), key=lambda kv: -kv[1])[: self.top_k] if v > 0]
+        ranked = [s for s, v in sorted(scores.items(), key=lambda kv: -kv[1]) if v > 0]
+        if self.buffer > 1:
+            zone = set(ranked[: int(self.top_k * self.buffer)])
+            winners = [s for s in self.held if s in zone][: self.top_k]
+            winners += [s for s in ranked if s not in winners][: self.top_k - len(winners)]
+        else:
+            winners = ranked[: self.top_k]
+        self.held = winners
         return {s: 1.0 / self.top_k for s in winners}
+
+
+class MomentumKeep(Momentum12_1):
+    """12-1 momentum that keeps a holding while it stays in the top 1.5 x k (lower turnover)."""
+
+    name = "momentum_keep"
+    param_grid = {"lookback": [126, 252], "buffer": [1.5, 2.0]}
+
+    def __init__(self, symbols, lookback: int = 252, skip: int = 21, top_k: int = 15, buffer: float = 1.5):
+        super().__init__(symbols, lookback, skip, top_k, buffer)
 
 
 class VolTarget(Strategy):

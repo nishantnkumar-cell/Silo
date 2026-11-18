@@ -128,6 +128,9 @@ class InformedPanel(_Informed, StylePanel):
                     except (TypeError, ValueError):
                         pass
         mean = {s: float(np.mean(v)) for s, v in totals.items() if v}
+        if not mean:  # no voice gave a usable answer: leave the book as it is
+            self.bad_replies += 1
+            return None
         picks = [s for s in sorted(mean, key=lambda s: -mean[s]) if mean[s] > 0]
         return self.weights_for(picks, brief)
 
@@ -170,7 +173,11 @@ class InformedDesk(_Informed, DebateDesk):
                          "to hold.", f"{table}\n\n{briefing}\n{debate}\n\nReply as {{\"picks\": [up to "
                          f"{self.top_k} ids], \"why\": \"<2 sentences>\"}}. Fewer picks is fine if few look good.",
                          clock)
-        picks = brief.to_symbols(trade.get("picks", []))
+        raw = trade.get("picks")
+        picks = brief.to_symbols(raw if isinstance(raw, list) else [])
+        if not isinstance(raw, list) or (raw and not picks):  # not an answer: leave the book as it is
+            self.bad_replies += 1
+            return None
         if not picks:
             return {}
         risk_notes = "\n".join(a.risk_note(picks) for a in self._agents())

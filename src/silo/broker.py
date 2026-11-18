@@ -25,6 +25,8 @@ class CostModel:
     fx_bps: float = 0.0  # currency conversion on traded value, both sides (pounds into dollars)
     llm_cost_per_decision: float = 0.0  # set when an LLM agent makes decisions
     dividend_tax: float = 0.0  # share of each dividend withheld at source (US shares for a UK investor: 15%)
+    cash_interest: bool = False  # pay interest on idle cash (off by default; turn on to compare with a tracker)
+    cash_rate: float = 0.0  # % a year, used when no Bank Rate series is cached (ctx:macro:bank_rate)
 
     @classmethod
     def uk(cls, **overrides) -> CostModel:
@@ -132,6 +134,7 @@ class SimBroker:
     fills: list[dict] = field(default_factory=list)
     dividends: list[dict] = field(default_factory=list)
     fees_paid: float = 0.0
+    interest_earned: float = 0.0
 
     def equity(self, prices: dict[str, float]) -> float:
         return self.cash + sum(q * prices[s] for s, q in self.positions.items() if q)
@@ -213,6 +216,12 @@ class SimBroker:
                     "fee": fee,
                 }
             )
+
+    def credit_interest(self, amount: float) -> None:
+        """Interest on idle cash (see ``CostModel.cash_interest``)."""
+        if amount > 0:
+            self.cash += amount
+            self.interest_earned += amount
 
     def charge(self, amount: float) -> None:
         """Debit a non-trade cost, such as LLM usage for a decision."""

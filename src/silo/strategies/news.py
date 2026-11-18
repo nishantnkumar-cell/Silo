@@ -30,8 +30,10 @@ class _Periodic(Strategy):
         self.last = p
         return True
 
-    def ready(self, view, bars: int) -> bool:
-        return all(len(view.bars(s, lookback=bars)) >= bars for s in self.symbols)
+    def ready(self, view, bars: int, need: int = 1) -> bool:
+        """Enough names have history. A late listing must not hold the whole book in cash."""
+        have = sum(len(view.bars(s, lookback=bars)) >= bars for s in self.symbols)
+        return have >= min(len(self.symbols), max(1, need))
 
 
 class NewsMomentum(_Periodic):
@@ -46,7 +48,7 @@ class NewsMomentum(_Periodic):
         self.top_k = top_k
 
     def decide(self, view):
-        if not self.ready(view, news.WINDOW + 1) or not self.due(view):
+        if not self.ready(view, news.WINDOW + 1, self.top_k) or not self.due(view):
             return None
         cols = news.columns(view, self.symbols)
         score = cols["news_mom"]
@@ -65,7 +67,7 @@ class ResultsDrift(_Periodic):
         self.min_move, self.hold, self.top_k = min_move, hold, top_k
 
     def decide(self, view):
-        if not self.ready(view, 30) or not self.due(view):
+        if not self.ready(view, 30, self.top_k) or not self.due(view):
             return None
         c = news.columns(view, self.symbols)
         good = [s for s in self.symbols
@@ -86,7 +88,7 @@ class DirectorBuys(_Periodic):
         self.top_k = top_k
 
     def decide(self, view):
-        if not self.ready(view, 30) or not self.due(view):
+        if not self.ready(view, 30, self.top_k) or not self.due(view):
             return None
         c = news.columns(view, self.symbols)
         picks = [s for s in self.symbols if c["director_buys"][s] >= 1 and not c["warning"][s]]

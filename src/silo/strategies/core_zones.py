@@ -153,6 +153,15 @@ class Zone:
         return 1.0 if self.penetration <= 0.5 else 0.0
 
     @property
+    def used_up(self) -> bool:
+        """Price has already traded through the far line (a wick, not a close): the orders are gone.
+
+        Not a violation in the manual's sense, but such a zone no longer counts
+        as the opposing zone that caps a trade's profit.
+        """
+        return self.violated or self.penetration >= 1.0
+
+    @property
     def structure(self) -> float:
         return self.strength + self.time + self.freshness
 
@@ -445,7 +454,7 @@ def score_demand(z: Zone, ltf: Bars, zones: list[Zone], tr: Trend, cv: Curve, ht
     entry = z.proximal
     stop = z.distal - stop_buffer
     risk = entry - stop
-    above = [s.proximal for s in zones if s.kind == "supply" and not s.violated and s.proximal > max(entry, price)]
+    above = [s.proximal for s in zones if s.kind == "supply" and not s.used_up and s.proximal > max(entry, price)]
     target_zone = min(above) if above else None
     if target_zone is None:
         htf_above = [s.proximal for s in htf_supply if s.proximal > max(entry, price)]
@@ -502,13 +511,13 @@ def analyze(daily: pd.DataFrame, ltf_lookback: int = 260, itf_lookback: int = 78
         if htf_cache is not None:
             htf_cache[key] = htf_done
     cv = curve(htf_done, price)
-    htf_supply = [z for z in find_zones(htf_done) if z.kind == "supply" and not z.violated] if len(htf_done) else []
+    htf_supply = [z for z in find_zones(htf_done) if z.kind == "supply" and not z.used_up] if len(htf_done) else []
     zones = find_zones(ltf)
     buffer = stop_atr * a
     demand = [z for z in zones if z.kind == "demand" and not z.violated and z.proximal <= price * 1.10]
     setups = [score_demand(z, ltf, zones, tr, cv, htf_supply, buffer, price) for z in demand]
     setups.sort(key=lambda s: (-s.score, -s.zone.proximal))
-    supply = sorted((z for z in zones if z.kind == "supply" and not z.violated and z.proximal > price),
+    supply = sorted((z for z in zones if z.kind == "supply" and not z.used_up and z.proximal > price),
                     key=lambda z: z.proximal)
     return Analysis(setups, supply, tr, cv, a, price)
 
@@ -526,6 +535,9 @@ class Trade:
     risk: float  # fraction of the book lost if the stop is hit
     zone_proximal: float
     opened: pd.Timestamp
+    take_at: float | None = None  # managed exits: sell part of the trade here (entry + partial_at x risk)
+    partial_done: bool = False
+    checked: pd.Timestamp | None = None  # last close the trade was checked at
 
 
 class CoreZones(Strategy):
@@ -540,6 +552,8 @@ class CoreZones(Strategy):
     most 2% of the book and all open trades together at most 6%. With
     ``exit="trail"`` there is no fixed target: the stop is raised under each
     new demand zone that forms (the manual's trailing stop) and profits run.
+    With ``exit="managed"`` (see :class:`CoreManaged`) open trades are checked
+    at every daily close through :meth:`manage`.
 
     Silo cannot place limit or stop orders: it decides at the close and fills
     at the next open, and by default only decides weekly. So entries, stops
@@ -552,10 +566,12 @@ class CoreZones(Strategy):
 
     def __init__(self, symbols, min_score: float = 7.0, exit: str = "target", risk_per_trade: float = 0.02,
                  max_open_risk: float = 0.06, max_weight: float = 0.10, target_frac: float = 0.75,
-                 min_reward_risk: float = 3.0, stop_atr: float = 0.10, chase: float = 0.5):
+                 min_reward_risk: float = 3.0, stop_atr: float = 0.10, chase: float = 0.5,
+                 partial_at: float = 2.0, partial_frac: float = 0.5, breakeven: bool = True):
         super().__init__(symbols)
-        if exit not in ("target", "trail"):
-            raise ValueError("exit must be 'target' or 'trail'")
+        if exit not in ("target", "trail", "managed"):
+            raise ValueError("exit must be 'target', 'trail' or 'managed'")
+        self.partial_at, self.partial_frac, self.breakeven = partial_at, partial_frac, breakeven
         self.min_score, self.exit = min_score, exit
         self.risk_per_trade, self.max_open_risk, self.max_weight = risk_per_trade, max_open_risk, max_weight
         self.target_frac, self.min_reward_risk, self.stop_atr, self.chase = (
@@ -567,6 +583,7 @@ class CoreZones(Strategy):
         self.last_seen: pd.Timestamp | None = None
         self._htf: dict = {}
         self.log: list[dict] = []
+        self.exited: dict[str, pd.Timestamp] = {}
 
     # -- helpers
     def _value(self, prices: dict[str, float]) -> float:
@@ -576,6 +593,65 @@ class CoreZones(Strategy):
         if self.last_seen is None:
             return bars.iloc[-5:]
         return bars[bars.index > self.last_seen]
+
+    def _trail(self, t: Trade, df: pd.DataFrame) -> None:
+        """Raise the stop under the newest demand zone that formed after the trade opened."""
+        if len(df) <= 120:
+            return
+        a = analyze(df, stop_atr=self.stop_atr, htf_cache=self._htf, cache_key=t.symbol)
+        if a is None:
+            return
+        new = [z for z in find_zones(Bars.from_frame(df.iloc[-260:]))
+               if z.kind == "demand" and not z.violated and z.strength >= 1
+               and df.index[-260:][z.base_start] > t.opened]
+        if new:
+            t.stop = max(t.stop, max(z.distal for z in new) - self.stop_atr * a.atr)
+
+    def manage(self, view: PointInTimeView):
+        """Daily check of open trades (``exit="managed"`` only).
+
+        At each close: a close at or below the stop sells the whole trade; the
+        first time the high reaches ``partial_at`` x the risk (1:2 by default),
+        ``partial_frac`` of it is sold and the stop moves up to the entry
+        (``breakeven``); after that the rest trails under new demand zones.
+        Orders go to the next open, like every Silo order.
+        """
+        if self.exit != "managed" or not self.trades:
+            return None
+        out: dict[str, float] = {}
+        for s, t in list(self.trades.items()):
+            df = view.bars(s, lookback=2520)
+            if not len(df):
+                continue
+            recent = df[df.index > t.checked] if t.checked is not None else df.iloc[-1:]
+            if not len(recent):
+                continue
+            now = df.index[-1]
+            price = float(df["close"].iloc[-1])
+            t.checked = now
+            if float(recent["close"].min()) <= t.stop:
+                self.cash += t.units * price
+                why = "trailing stop" if t.partial_done else "stop"
+                self.log.append({"date": str(now), "symbol": s, "action": "exit", "why": why, "price": price,
+                                 "r": (price - t.entry) / (t.entry - t.stop) if t.entry > t.stop else 0.0})
+                del self.trades[s]
+                self.exited[s] = now
+                out[s] = 0.0
+                continue
+            if not t.partial_done and t.take_at is not None and float(recent["high"].max()) >= t.take_at:
+                sold = t.units * self.partial_frac
+                self.cash += sold * price
+                t.units -= sold
+                t.partial_done = True
+                t.risk = 0.0 if self.breakeven else t.risk * (1 - self.partial_frac)
+                if self.breakeven:
+                    t.stop = max(t.stop, t.entry)
+                self.log.append({"date": str(now), "symbol": s, "action": "partial", "why": "1:%g reached"
+                                 % self.partial_at, "price": price, "sold_frac": self.partial_frac})
+                out[s] = 1.0 - self.partial_frac
+            if t.partial_done:
+                self._trail(t, df)
+        return out or None
 
     def decide(self, view: PointInTimeView):
         changed = False
@@ -588,20 +664,14 @@ class CoreZones(Strategy):
                 prices[s] = float(df["close"].iloc[-1])
         newest = max((f.index[-1] for f in frames.values()), default=None)
 
-        # 1. exits: a stop or target touched since the last decision
+        # 1. exits: a stop or target touched since the last decision (managed trades exit in manage())
         for s, t in list(self.trades.items()):
             df = frames.get(s)
-            if df is None:
+            if df is None or self.exit == "managed":
                 continue
             recent = self._since(df)
-            if self.exit == "trail" and len(df) > 120:
-                a = analyze(df, stop_atr=self.stop_atr, htf_cache=self._htf, cache_key=s)
-                if a is not None:
-                    new = [z for z in find_zones(Bars.from_frame(df.iloc[-260:]))
-                           if z.kind == "demand" and not z.violated and z.strength >= 1
-                           and df.index[-260:][z.base_start] > t.opened]
-                    if new:
-                        t.stop = max(t.stop, max(z.distal for z in new) - self.stop_atr * a.atr)
+            if self.exit == "trail":
+                self._trail(t, df)
             hit_stop = len(recent) and float(recent["close"].min()) <= t.stop
             hit_target = t.target is not None and len(recent) and float(recent["high"].max()) >= t.target
             if hit_stop or hit_target:
@@ -609,6 +679,7 @@ class CoreZones(Strategy):
                 self.log.append({"date": str(newest), "symbol": s, "action": "exit",
                                  "why": "stop" if hit_stop else "target", "price": prices[s]})
                 del self.trades[s]
+                self.exited[s] = newest
                 changed = True
 
         # 2. entries: price back at a qualifying demand zone
@@ -617,6 +688,8 @@ class CoreZones(Strategy):
         for s, df in frames.items():
             if s in self.trades or len(df) < 260:
                 continue
+            if self.last_seen is not None and self.exited.get(s, self.last_seen) > self.last_seen:
+                continue  # sold since the last decision: don't buy straight back
             a = analyze(df, stop_atr=self.stop_atr, htf_cache=self._htf, cache_key=s)
             if a is None:
                 continue
@@ -637,7 +710,13 @@ class CoreZones(Strategy):
                 risk = entry - st.stop
                 if risk <= 0:
                     continue
-                if self.exit == "target":
+                if self.exit == "managed":
+                    if st.target is not None:  # the room to the next supply must pay min_reward_risk
+                        room = z.proximal + self.target_frac * (st.target - z.proximal)
+                        if (room - entry) / risk < self.min_reward_risk:
+                            continue
+                    target = None
+                elif self.exit == "target":
                     if st.target is None:
                         target = entry + self.min_reward_risk * risk * 2
                     else:
@@ -667,7 +746,8 @@ class CoreZones(Strategy):
                 if weight < 0.01:
                     continue
             self.cash -= spend
-            self.trades[s] = Trade(s, entry, stop, target, spend / entry, risk, prox, newest)
+            take = entry + self.partial_at * (entry - stop) if self.exit == "managed" else None
+            self.trades[s] = Trade(s, entry, stop, target, spend / entry, risk, prox, newest, take, False, newest)
             open_risk += risk
             self.log.append({"date": str(newest), "symbol": s, "action": "buy", "score": score,
                              "entry": entry, "stop": stop, "target": target})
@@ -688,4 +768,23 @@ class CoreZonesTrail(CoreZones):
 
     def __init__(self, symbols, **kwargs):
         kwargs.setdefault("exit", "trail")
+        super().__init__(symbols, **kwargs)
+
+
+class CoreManaged(CoreZones):
+    """Core Strategy entries with Nishant's trade management, checked every day.
+
+    * Only setups with room for at least 1:4 reward-to-risk to the next supply.
+    * A daily close at or below the stop sells the whole position (even inside
+      the 20-day minimum hold: stops always win).
+    * At 1:2, half is sold and the stop moves to the entry price.
+    * The other half trails under each new demand zone until it is stopped out.
+    """
+
+    name = "core_managed"
+    param_grid = {"min_score": [7.0, 8.5]}
+
+    def __init__(self, symbols, **kwargs):
+        kwargs.setdefault("exit", "managed")
+        kwargs.setdefault("min_reward_risk", 4.0)
         super().__init__(symbols, **kwargs)

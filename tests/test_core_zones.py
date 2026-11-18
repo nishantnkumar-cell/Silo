@@ -118,3 +118,128 @@ def test_core_desk_keeps_original_desk_prompts_unchanged(tables):
     assert core.header.startswith(HEADER + " | zone score")
     assert all(len(v) == 15 for v in core.rows.values())
     assert "demand zone" in RULEBOOK
+
+
+# -- trade management: daily stops, half off at 1:2, trail the rest
+
+
+def _scripted(keep, on_day):
+    """Buys AAA on the first decision; manage() asks for a cut on a chosen day."""
+    from silo.strategies.base import Strategy
+
+    class Scripted(Strategy):
+        name = "scripted"
+
+        def reset(self):
+            self.n = 0
+            self.bought = False
+
+        def decide(self, view):
+            if not self.bought:
+                self.bought = True
+                return {"AAA": 0.1}
+            return None
+
+        def manage(self, view):
+            self.n += 1
+            return {"AAA": keep} if self.n == on_day else None
+
+    return Scripted(["AAA"])
+
+
+def test_daily_stop_overrides_min_hold_and_weekly_rebalance(tables):
+    from silo.constraints import Constraints
+    from silo.engine import run_backtest
+
+    c = Constraints.position_trading(liquidity=None)
+    full = run_backtest(_scripted(0.0, 8), tables, constraints=c)
+    sells = full.fills[full.fills["qty"] < 0]
+    assert len(sells) == 1  # sold on day 9, well inside the 20-day minimum hold
+    assert full.decisions[-1]["exits"] == {"AAA": 0.0}
+    half = run_backtest(_scripted(0.5, 8), tables, constraints=c)
+    buy = half.fills[half.fills["qty"] > 0]["qty"].sum()
+    sold = -half.fills[half.fills["qty"] < 0]["qty"].sum()
+    assert abs(sold / buy - 0.5) < 1e-9
+    off = run_backtest(_scripted(0.0, 8), tables, constraints=Constraints.position_trading(
+        liquidity=None, daily_exit_checks=False))
+    # checked on rebalance days only: the same cut comes weeks later
+    assert off.fills[off.fills["qty"] < 0]["date"].iloc[0] > sells["date"].iloc[0] + pd.Timedelta(days=30)
+
+
+def _tables_from(rows, start="2020-01-01"):
+    from silo.data.vault import normalize_bars
+
+    idx = pd.bdate_range(start, periods=len(rows))
+    a = np.array(rows, dtype=float)
+    df = pd.DataFrame({"open": a[:, 0], "high": a[:, 1], "low": a[:, 2], "close": a[:, 3],
+                       "volume": 1e7}, index=idx)
+    return {"AAA": normalize_bars(df)}
+
+
+def _managed_with_trade(tables, entry=100.0, stop=95.0, day=300):
+    from silo.strategies.core_zones import CoreManaged, Trade
+
+    s = CoreManaged(["AAA"])
+    s.reset()
+    opened = tables["AAA"].index[day - 1]
+    s.trades["AAA"] = Trade("AAA", entry, stop, None, 0.1 / entry, 0.01, 99.0, opened,
+                            entry + 2 * (entry - stop), False, opened)
+    s.cash = 0.9
+    return s
+
+
+def _view_at(tables, i):
+    return PointInTimeView(tables, tables["AAA"]["available_at"].iloc[i])
+
+
+def test_managed_stop_sells_everything():
+    rows = [(100, 101, 99, 100)] * 300 + [(100, 100.5, 94, 94.5)]
+    t = _tables_from(rows)
+    s = _managed_with_trade(t)
+    assert s.manage(_view_at(t, 300)) == {"AAA": 0.0}
+    assert "AAA" not in s.trades and s.log[-1]["why"] == "stop"
+
+
+def test_managed_half_off_at_1_to_2_then_breakeven_stop():
+    rows = [(100, 101, 99, 100)] * 300 + [(100, 110.5, 100, 109), (109, 109.5, 104, 104.5), (104, 104, 99, 99.5)]
+    t = _tables_from(rows)
+    s = _managed_with_trade(t)
+    assert s.manage(_view_at(t, 300)) == {"AAA": 0.5}  # high 110.5 >= 100 + 2 x 5
+    tr = s.trades["AAA"]
+    assert tr.partial_done and tr.stop == 100.0 and abs(tr.units - 0.05 / 100) < 1e-12
+    assert s.manage(_view_at(t, 301)) is None  # 104.5 is above the breakeven stop
+    assert s.manage(_view_at(t, 302)) == {"AAA": 0.0}  # the other half stops at entry
+    assert s.log[-1]["why"] == "trailing stop"
+
+
+def test_core_managed_needs_1_to_4(tables):
+    from silo.engine import run_backtest
+    from silo.strategies.core_zones import CoreManaged
+
+    s = CoreManaged(list(tables))
+    run_backtest(s, tables)
+    assert s.min_reward_risk == 4.0
+    for b in (x for x in s.log if x["action"] == "buy"):
+        assert b["stop"] < b["entry"] and b["target"] is None
+
+
+def test_zones_report_shows_supply_and_a_verdict(tmp_path):
+    from silo.cli import main
+
+    out = tmp_path / "zones.html"
+    assert main(["zones", "--demo", "--out", str(out)]) == 0
+    page = out.read_text()
+    assert "rect class='supply'" in page and "Research only" in page
+    from silo.lab.zones_report import zone_row
+
+    rows = _tables_from(DBR * 40)
+    r = zone_row("AAA", rows["AAA"])
+    assert r is not None and r.verdict in ("in buy zone", "wait for pull-back", "supply too close", "no trade")
+
+
+def test_supply_wicked_through_is_used_up():
+    from silo.strategies.core_zones import Zone
+
+    z = Zone("supply", "RBD", 100.0, 102.0, 0, 1, 2, 1, 3.0, True, penetration=1.4)
+    assert z.used_up and not z.violated and z.freshness == 0.0
+    assert not Zone("supply", "RBD", 100.0, 102.0, 0, 1, 2, 1, 3.0, True, penetration=0.4).used_up

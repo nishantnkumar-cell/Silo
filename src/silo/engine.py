@@ -5,7 +5,10 @@ trading day:
 1. dividends go ex: shares held at the prior close receive cash;
 2. orders decided at the last rebalance fill at today's open;
 3. the clock moves to today's close and equity is marked;
-4. on a rebalance day the strategy sees a :class:`PointInTimeView` at that
+4. if the strategy manages open trades (``Strategy.manage``), it checks
+   them at every close: stop-loss and profit-taking sells go to the next
+   open even between rebalances and inside the minimum hold;
+5. on a rebalance day the strategy sees a :class:`PointInTimeView` at that
    clock; its target weights pass through the position-trading constraints
    and become orders for the next open. Liquidity rules (no penny stocks,
    enough daily trading, positions small enough to sell) apply first.
@@ -17,7 +20,7 @@ from dataclasses import dataclass, field
 
 import pandas as pd
 
-from silo.broker import CostModel, SimBroker
+from silo.broker import CostModel, Order, SimBroker
 from silo.constraints import Constraints, apply_constraints, is_rebalance_day
 from silo.firewall import PointInTimeView, PreparedTables, is_context
 from silo.liquidity import apply_liquidity
@@ -25,6 +28,7 @@ from silo.metrics import summarize
 from silo.strategies.base import Strategy
 
 FILL_COLUMNS = ["date", "decided_at", "symbol", "qty", "price", "fee"]
+BANK_RATE = "ctx:macro:bank_rate"
 
 
 @dataclass
@@ -36,6 +40,7 @@ class BacktestResult:
     fees_paid: float = 0.0
     dividends: float = 0.0
     dividend_events: list[dict] = field(default_factory=list)
+    interest: float = 0.0
 
     def metrics(self) -> dict[str, float]:
         return summarize(self.equity, self.fills)
@@ -61,6 +66,20 @@ class MarketData:
                 zip(df.index, zip(df["open"].to_numpy(), df["close"].to_numpy(), df["available_at"], div, vol))
             )
         self.dates = sorted(set().union(*(df.index for s, df in tables.items() if not is_context(s))))
+        rate = tables.get(BANK_RATE)
+        self._rate = None
+        if rate is not None and len(rate):
+            rate = rate.sort_values("available_at")
+            when = pd.DatetimeIndex(rate["available_at"]).tz_convert("UTC").as_unit("ns").asi8
+            self._rate = (when, rate["value"].to_numpy(dtype=float))
+
+    def cash_rate(self, clock: pd.Timestamp, fallback: float = 0.0) -> float:
+        """Bank Rate (% a year) public at ``clock``; ``fallback`` when no series is cached."""
+        if self._rate is None or clock is None:
+            return fallback
+        when, values = self._rate
+        i = int(when.searchsorted(pd.Timestamp(clock).tz_convert("UTC").as_unit("ns").value, side="right")) - 1
+        return float(values[i]) if i >= 0 else fallback
 
 
 @dataclass
@@ -69,6 +88,7 @@ class Session:
     broker: SimBroker
     constraints: Constraints = field(default_factory=Constraints)
     last_date: pd.Timestamp | None = None
+    last_clock: pd.Timestamp | None = None
     last_close: dict[str, float] = field(default_factory=dict)
     held_days: dict[str, int] = field(default_factory=dict)
     equity: dict[pd.Timestamp, float] = field(default_factory=dict)
@@ -88,6 +108,11 @@ class Session:
         today = {s: r[date] for s, r in data.rows.items() if date in r}
         n_fills = len(self.broker.fills)
         n_divs = len(self.broker.dividends)
+        costs = self.broker.costs
+        if costs.cash_interest and self.last_date is not None and self.broker.cash > 0:
+            # interest for the nights since the last trading day, at the rate known at that close
+            rate = data.cash_rate(self.last_clock, costs.cash_rate)
+            self.broker.credit_interest(self.broker.cash * rate / 100 * (date - self.last_date).days / 365)
         self.broker.credit_dividends({s: float(r[3]) for s, r in today.items() if r[3]}, date)
         volumes = {s: float(r[4]) for s, r in today.items()} if self.constraints.liquidity else None
         self.broker.fill_at_open({s: float(r[0]) for s, r in today.items()}, date, volumes)
@@ -102,9 +127,21 @@ class Session:
         self.equity[date] = self.broker.equity(self.last_close)
 
         decision = None
-        if is_rebalance_day(date, self.last_date, self.constraints.rebalance):
+        rebalance = is_rebalance_day(date, self.last_date, self.constraints.rebalance)
+        exits: dict[str, float] = {}
+        view = None
+        if self._checks_daily() or (rebalance and self._has_manage()):
             view = PointInTimeView(data.prepared, clock)
+            exits = {s: min(max(float(k), 0.0), 1.0) for s, k in (self.strategy.manage(view) or {}).items()
+                     if self.broker.positions.get(s) and s in self.last_close}
+        if rebalance:
+            view = view or PointInTimeView(data.prepared, clock)
             weights = self.strategy.decide(view)
+            if weights is None and exits:
+                final = self._apply_exits(self.broker.weights(self.last_close), exits)
+                self._queue_exits(exits, clock)
+                decision = {"date": date, "clock": clock, "weights": final, "proposed": {}, "exits": dict(exits)}
+                self.decisions.append(decision)
             if weights is not None:
                 if self.strategy.uses_llm:
                     self.broker.charge(self.broker.costs.llm_cost_per_decision)
@@ -117,15 +154,25 @@ class Session:
                         weights, current, view, self.equity[date], self.constraints.liquidity
                     )
                 final = apply_constraints(target, current, self.held_days, self.constraints)
+                if exits:  # stops and profit-taking override the minimum hold
+                    final = self._apply_exits(final, exits, current)
                 self.broker.target_weights(final, self.last_close, clock)
                 decision = {"date": date, "clock": clock, "weights": dict(final), "proposed": dict(weights)}
+                if exits:
+                    decision["exits"] = dict(exits)
                 notes = getattr(self.strategy, "last_notes", None)
                 if notes:  # the strategy's own reasons (e.g. which names the bear warned about), for the journal
                     decision["notes"] = notes
                 if blocked:
                     decision["liquidity"] = blocked
                 self.decisions.append(decision)
+        elif exits:
+            final = self._apply_exits(self.broker.weights(self.last_close), exits)
+            self._queue_exits(exits, clock)
+            decision = {"date": date, "clock": clock, "weights": final, "proposed": {}, "exits": dict(exits)}
+            self.decisions.append(decision)
         self.last_date = date
+        self.last_clock = clock
         return {
             "date": date,
             "equity": self.equity[date],
@@ -134,12 +181,38 @@ class Session:
             "decision": decision,
         }
 
+    def _has_manage(self) -> bool:
+        return type(self.strategy).manage is not Strategy.manage
+
+    def _checks_daily(self) -> bool:
+        return self.constraints.daily_exit_checks and self._has_manage()
+
+    @staticmethod
+    def _apply_exits(weights: dict[str, float], exits: dict[str, float],
+                     current: dict[str, float] | None = None) -> dict[str, float]:
+        """Cut each exited name to ``keep`` times what is held now (never more than the plan)."""
+        current = weights if current is None else current
+        out = dict(weights)
+        for s, keep in exits.items():
+            out[s] = min(out.get(s, 0.0), keep * current.get(s, 0.0))
+        return {s: w for s, w in out.items() if w > 1e-9}
+
+    def _queue_exits(self, exits: dict[str, float], clock: pd.Timestamp) -> None:
+        """Sell orders for the next open, outside a rebalance: only the exited names trade."""
+        self.broker.pending = [o for o in self.broker.pending if o.symbol not in exits]
+        for s, keep in exits.items():
+            qty = self.broker.positions.get(s, 0.0)
+            sell = qty * (1.0 - keep)
+            if sell > 0:
+                self.broker.pending.append(Order(s, -sell, clock))
+
     def result(self) -> BacktestResult:
         fills = pd.DataFrame(self.broker.fills, columns=FILL_COLUMNS)
         divs = sum(d["qty"] * d["per_share"] - d.get("withheld", 0.0) for d in self.broker.dividends)
         return BacktestResult(
             self.strategy.name, pd.Series(self.equity, name="equity", dtype=float), fills,
             self.decisions, self.broker.fees_paid, divs, list(self.broker.dividends),
+            getattr(self.broker, "interest_earned", 0.0),
         )
 
 

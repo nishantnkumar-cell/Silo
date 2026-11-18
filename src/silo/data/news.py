@@ -50,7 +50,7 @@ CATEGORY_RULES = [
     ("profit_warning", r"profit warning|below (market )?expectations"),
     ("trading_update", r"trading (update|statement)|pre-close|interim management statement|business update|"
                        r"q[1-4] trading|first quarter trading|third quarter trading"),
-    ("results", r"results|interim report|half.year report|half.yearly|annual report and accounts|"
+    ("results", r"results|interim report|half.year (financial )?report|half.yearly|interim (financial )?report|annual report and accounts|"
                 r"quarter(ly)? (report|update)|q[1-4] (\d{4} )?(results|report)"),
     ("mna", r"offer for|possible offer|rule 2\.[47]|recommended (cash )?(offer|acquisition)|acquisition|"
             r"disposal|merger|scheme of arrangement"),
@@ -104,12 +104,41 @@ def expectation_sign(text: str) -> int:
     return 0
 
 
+_NATURE = re.compile(r"nature of (the )?transactions?", re.I)
+_FIELD_END = re.compile(r"\bprice\(?s?\)?\s*(\(?s\)?)?\s*(and|&)\s*volume|\bprice\(s\)|aggregated information|"
+                        r"date of the transaction|place of the transaction", re.I)
+_FOOTER = re.compile(r"\bAbout [A-Z][\w&'.-]*|(?i:notes to editors|\benquiries\b|\bcontacts?:|media relations)")
+
+
+def dealing_section(text: str) -> str:
+    """The part of a PDMR notice that describes the deal, without the company's boilerplate.
+
+    The standard notice has a "Nature of the transaction" field; when it is
+    present only that field is read. Otherwise the text is cut before the
+    "About <company>" / "Notes to editors" / "Enquiries" footer, which often
+    holds words like "sold in 125 countries".
+    """
+    if not text:
+        return ""
+    fields = [m for m in _NATURE.finditer(text)]
+    if fields:
+        parts = []
+        for m in fields:
+            rest = text[m.end(): m.end() + 400]
+            end = _FIELD_END.search(rest)
+            parts.append(rest[: end.start()] if end else rest)
+        return " ".join(parts)
+    foot = _FOOTER.search(text)
+    return text[: foot.start()] if foot else text
+
+
 def dealing_direction(text: str) -> int:
     """+1 a director bought shares with their own money, -1 sold, 0 anything else.
 
     Awards, option exercises, vesting, dividend reinvestment and share plans
     carry little information and count as 0.
     """
+    text = dealing_section(text)
     if not text or _NOT_A_DEAL.search(text):
         return 0
     buy, sell = bool(_BUY.search(text)), bool(_SELL.search(text))
@@ -188,7 +217,8 @@ class Fetcher:
     def _urlopen(url: str) -> str:
         req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
         with urllib.request.urlopen(req, timeout=60) as r:  # noqa: S310 - fixed https host
-            return r.read().decode("utf-8", "replace")
+            charset = r.headers.get_content_charset() or "utf-8"
+            return r.read().decode(charset, "replace")
 
     def get(self, url: str) -> str:
         if not url.startswith(BASE + "/"):
@@ -292,3 +322,39 @@ def fetch_news(vault, symbols: list[str], since: str = "2012-01-01", delay: floa
             failed.append(s)
             log(f"news fetch failed for {s}: {exc}")
     return failed
+
+
+def rescore(vault, fetcher: Fetcher | None = None, log=print) -> int:
+    """Re-run the rules on stored announcements after a rule fix; returns rows that changed.
+
+    Changed rows go into a new snapshot (newest wins on read), so nothing is
+    overwritten. With a ``fetcher``, announcements that now fall into a
+    category needing text but have none stored get it fetched, politely.
+    """
+    try:
+        news = vault.get_context(TABLE)
+    except KeyError:
+        return 0
+    rows = news.reset_index().rename(columns={"index": "id"})
+    rows["category"] = [classify(h) for h in rows["headline"].fillna("")]
+    bodies = []
+    for ann_id, cat, url in zip(rows["id"], rows["category"], rows["url"]):
+        body = load_body(vault, ann_id)
+        if not body and fetcher is not None and cat in BODY_CATEGORIES:
+            try:
+                body = body_text(fetcher.get(url))[:20000]
+            except Exception:  # noqa: BLE001 - a missing body only loses that signal
+                body = ""
+        bodies.append(body)
+    rows["body"] = bodies
+    save_bodies(vault, rows)
+    rows = derive(rows)
+    old = news.reindex(rows["id"])
+    changed = ((rows["category"].to_numpy() != old["category"].to_numpy())
+               | (rows["expect"].to_numpy() != old["expect"].to_numpy())
+               | (rows["dealing"].to_numpy() != old["dealing"].to_numpy()))
+    out = rows[changed].drop(columns="body")
+    if len(out):
+        vault.put_context(TABLE, to_table(out))
+    log(f"rescored {len(rows)} announcement(s); {len(out)} changed")
+    return int(len(out))

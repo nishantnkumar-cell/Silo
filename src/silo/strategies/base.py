@@ -28,3 +28,14 @@ class Strategy:
 
     def decide(self, view: PointInTimeView) -> dict[str, float] | None:
         raise NotImplementedError
+
+    def manage(self, view: PointInTimeView) -> dict[str, float] | None:
+        """Check open trades at a daily close, between rebalances too.
+
+        Return ``{symbol: keep}`` for positions to cut at the next open, where
+        ``keep`` is the fraction of the holding to keep (0 sells it all, 0.5
+        sells half). Only sells are honoured, and they override the minimum
+        hold, because a stop-loss must always be acted on. ``None`` (the
+        default) means the strategy does not manage trades day to day.
+        """
+        return None

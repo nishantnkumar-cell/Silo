@@ -18,13 +18,14 @@ from pathlib import Path
 from silo.data.vault import DataVault
 from silo.paper import PaperBook
 
-RULE_CONTESTANTS = ["uk_trend", "momentum", "blend", "sector_mom", "macro_tilt", "news_mom", "results_drift",
-                    "director_buys", "random"]
+RULE_CONTESTANTS = ["uk_trend", "momentum", "momentum_keep", "momentum_managed", "sector_mom",
+                    "sector_mom_managed", "blend", "blend_equal", "macro_tilt", "news_mom", "results_drift",
+                    "director_buys", "shortlist_top", "shortlist_random", "random"]
 # The luck control rebalances about once a month into a random ~90% of names.
 # Momentum was written for short ETF lists (top 3); on ~100 shares it holds 15. Its variants match.
 PARAMS = {"random": {"decide_prob": 0.25, "exposure": 0.9}, "momentum": {"top_k": 15},
           "macro_tilt": {"top_k": 15}, "news_mom": {"top_k": 15}}
-AI_CONTESTANTS = ["desk", "panel", "silo_agent", "panel_macro", "desk_macro", "panel_news", "desk_news",
+AI_CONTESTANTS = ["desk", "panel", "desk_v2", "panel_v2", "silo_agent", "panel_macro", "desk_macro", "panel_news", "desk_news",
                   "panel_full", "desk_full"]
 # Daily-bar books (silver, crypto): rules that act on daily signals, plus a random control
 # that rebalances about every ten days.

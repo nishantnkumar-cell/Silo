@@ -47,6 +47,11 @@ DRIVERS = {d.name: d for d in [
     Driver("gilt10", "UK 10-year gilt yield", "boe", "IUDMNPY", kind="level"),
 ]}
 
+# Series kept for bookkeeping, not shown to models or used as signals: Bank Rate pays interest on idle cash.
+EXTRA = {d.name: d for d in [
+    Driver("bank_rate", "Bank of England base rate", "boe", "IUDBEDR", kind="level"),
+]}
+
 # Drivers used for each stock's sensitivities (besides the UK market itself).
 BETA_DRIVERS = ["gbp", "oil", "copper", "gilt10"]
 
@@ -98,7 +103,7 @@ def parse_boe_csv(text: str, code: str) -> pd.DataFrame:
 
 
 def fetch_driver(name: str, start: str = "2005-01-01") -> pd.DataFrame:
-    d = DRIVERS[name]
+    d = DRIVERS.get(name) or EXTRA[name]
     if d.source == "yahoo":
         try:
             import yfinance as yf
@@ -119,7 +124,7 @@ def fetch_driver(name: str, start: str = "2005-01-01") -> pd.DataFrame:
 def fetch_all(vault, names=None, log=print) -> list[str]:
     """One new snapshot per driver. Returns drivers that failed."""
     failed = []
-    for name in names or list(DRIVERS):
+    for name in names or list(DRIVERS) + list(EXTRA):
         try:
             stored = vault.put_context(table_name(name), fetch_driver(name))
             log(f"{name}: {len(stored)} days, {stored.index[0].date()} to {stored.index[-1].date()}")
