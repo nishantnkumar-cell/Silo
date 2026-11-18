@@ -77,29 +77,30 @@ def resample(df: pd.DataFrame, rule: str) -> pd.DataFrame:
                          "low": np.minimum.reduceat(l, starts), "close": c[ends]}, index=df.index[ends])
 
 
-def candle_kinds(b: Bars, base_body: float = 0.5) -> np.ndarray:
-    """+1 rally leg, -1 drop leg, 0 base candle.
+def candle_kinds(b: Bars, leg_close: float = 0.6) -> np.ndarray:
+    """+1 rally leg, -1 drop leg, 0 base candle (manual slides 50, 79-81).
 
-    A *base* candle is a small-bodied, neutral candle (body at most half its
-    range). A *leg* candle has a body bigger than half its range. A gap counts
-    toward the body: the manual colours in the space between the prior close
-    and the gapping candle's close, so the "body" runs from the prior close
-    when that is larger.
+    A *leg* candle closes outside the range of the candle before it and looks
+    bullish (bearish): it closes beyond the previous high (low) and in the top
+    (bottom) 40% of its own range, the manual's candle-sentiment bands. A gap
+    counts as part of the candle: the range is coloured in from the previous
+    close. Every other candle is a *base* candle: neutral, closing inside the
+    previous candle's range. The first candle has nothing before it and is a base.
     """
     n = len(b)
-    prev_c = np.r_[b.o[0], b.c[:-1]]
-    body_own = np.abs(b.c - b.o)
-    body_gap = np.abs(b.c - prev_c)
-    use_gap = body_gap > body_own
-    start = np.where(use_gap, prev_c, b.o)
-    body = np.abs(b.c - start)
-    hi = np.maximum(b.h, np.where(use_gap, prev_c, b.h))
-    lo = np.minimum(b.l, np.where(use_gap, prev_c, b.l))
-    rng = np.maximum(hi - lo, 1e-12)
     kind = np.zeros(n, dtype=int)
-    leg = body > base_body * rng
-    kind[leg & (b.c > start)] = 1
-    kind[leg & (b.c < start)] = -1
+    if n < 2:
+        return kind
+    pc, ph, pl = b.c[:-1], b.h[:-1], b.l[:-1]
+    o, h, l, c = b.o[1:], b.h[1:], b.l[1:], b.c[1:]  # noqa: E741
+    hi = np.maximum(h, pc)
+    lo = np.minimum(l, pc)
+    rng = hi - lo
+    pos = np.where(rng > 0, (c - lo) / np.where(rng > 0, rng, 1.0), 0.5)
+    up = (rng > 0) & (c > ph) & (pos >= leg_close)
+    dn = (rng > 0) & (c < pl) & (pos <= 1 - leg_close)
+    kind[1:][up] = 1
+    kind[1:][dn] = -1
     return kind
 
 
@@ -184,16 +185,27 @@ def swings(b: Bars, k: int = 2) -> tuple[list[int], list[int]]:
     return list(np.flatnonzero(is_h) + k), list(np.flatnonzero(is_l) + k)
 
 
-def find_zones(b: Bars, max_base: int = 10, kinds: np.ndarray | None = None) -> list[Zone]:
+def find_zones(b: Bars, max_base: int = 6, kinds: np.ndarray | None = None, wick: bool = True) -> list[Zone]:
     """Every leg-base-leg formation in the bars, scored for structure and freshness.
 
-    Going left to right: a leg candle (leg-in), 1 to ``max_base`` base
-    candles, then a leg candle (leg-out). The leg-out's direction makes it
-    demand (up) or supply (down); the leg-in's makes it a continuation (RBR,
-    DBD) or a reversal (DBR, RBD). Line placement follows the manual's
-    preferred setting: proximal at the base's highest body (demand) or lowest
-    body (supply); distal at the formation's extreme low (high), including the
-    leg-in for reversals.
+    Follows the Core Strategy manual, the same rules as the TradingView
+    indicator (``tradingview/core_zones.pine``):
+
+    * a leg candle (leg-in), 1 to ``max_base`` base candles, then a leg candle
+      (leg-out); the leg-out's direction makes it demand (up) or supply (down),
+      the leg-in's makes it a continuation (RBR, DBD) or a reversal (DBR, RBD);
+    * the move out (consecutive closes in the leg-out's direction) must be
+      *explosive*: it must make a new high (low) past the last swing high (low)
+      before the base; a big candle that fails to is not a zone (slides 72-77);
+    * proximal at the base's highest (lowest) body; distal at the extreme of the
+      whole DBR (RBD), or of the base and move out for RBR (DBD) (slides 96-115);
+    * breakout (strength): the move out crosses past the previous opposing zone
+      that was still live when the base formed (slides 121-124);
+    * a trade through the distal line (``wick=True``; a close if ``False``)
+      violates the zone, including during a reversal's move out (slide 132).
+
+    The lower-time-frame refinement the indicator does needs intraday bars,
+    which Silo does not have, so Silo trades the unrefined daily zone.
     """
     n = len(b)
     if n < 4:
@@ -203,76 +215,95 @@ def find_zones(b: Bars, max_base: int = 10, kinds: np.ndarray | None = None) -> 
     body_hi = np.maximum(b.o, b.c)
     body_lo = np.minimum(b.o, b.c)
     zones: list[Zone] = []
-    i = 1
-    while i < n - 1:
-        if kind[i] != 0 or kind[i - 1] == 0:
-            i += 1
+    for t in range(2, n):  # t = first leg-out candle
+        out = int(kind[t])
+        if out == 0 or kind[t - 1] != 0:
             continue
-        j = i
-        while j + 1 < n and kind[j + 1] == 0 and j - i + 1 < max_base:
-            j += 1
-        if j + 1 >= n or kind[j + 1] == 0:  # no leg-out (yet), or base too long
-            i = j + 1
+        nb = 0
+        while nb <= max_base and t - 1 - nb >= 0 and kind[t - 1 - nb] == 0:
+            nb += 1
+        li = t - 1 - nb  # the leg-in candle
+        if not 1 <= nb <= max_base or li < 0 or kind[li] == 0:
             continue
-        leg_in, out = kind[i - 1], kind[j + 1]
-        # move out: consecutive closes in the leg-out's direction
-        k = j + 1
-        while k + 1 < n and (b.c[k + 1] - b.c[k]) * out > 0:
-            k += 1
+        i, j = li + 1, t - 1  # the base
+        reversal = kind[li] != out
+        e = t  # end of the move out: consecutive closes in the leg-out's direction
+        while e + 1 < n and (b.c[e + 1] - b.c[e]) * out > 0:
+            e += 1
         if out > 0:
-            prox = body_hi[i:j + 1].max()
-            lo_from = i - 1 if leg_in < 0 else i
-            dist = b.l[lo_from:k + 1].min()
-            extreme = b.h[j + 1:k + 1].max()
-            if not (extreme > b.h[i - 1:j + 1].max()):  # must make a new high: an explosive rally
-                i = j + 1
+            prox = float(body_hi[i:j + 1].max())
+            if reversal:  # whole drop-base-rally; the rally must not trade back through it
+                dist = float(b.l[li:t + 1].min())
+                broken = e > t and (b.l if wick else b.c)[t + 1:e + 1].min() < dist
+            else:
+                dist, broken = float(b.l[i:e + 1].min()), False
+            need = float(b.h[li:j + 1].max())
+            for s_ in reversed(sw_hi):
+                if s_ < i and b.h[s_] > need:
+                    need = float(b.h[s_])
+                    break
+            extreme = float(b.h[t:e + 1].max())
+            if not extreme > need or broken or not prox > dist:
                 continue
-            prior = [s for s in sw_hi if s < i - 1]
-            breakout = bool(prior) and extreme > b.h[prior[-1]] and b.h[prior[-1]] > prox
-            form = "DBR" if leg_in < 0 else "RBR"
-            kind_name = "demand"
+            form, kind_name, opp_kind = ("DBR" if reversal else "RBR"), "demand", "supply"
         else:
-            prox = body_lo[i:j + 1].min()
-            hi_from = i - 1 if leg_in > 0 else i
-            dist = b.h[hi_from:k + 1].max()
-            extreme = b.l[j + 1:k + 1].min()
-            if not (extreme < b.l[i - 1:j + 1].min()):
-                i = j + 1
+            prox = float(body_lo[i:j + 1].min())
+            if reversal:
+                dist = float(b.h[li:t + 1].max())
+                broken = e > t and (b.h if wick else b.c)[t + 1:e + 1].max() > dist
+            else:
+                dist, broken = float(b.h[i:e + 1].max()), False
+            need = float(b.l[li:j + 1].min())
+            for s_ in reversed(sw_lo):
+                if s_ < i and b.l[s_] < need:
+                    need = float(b.l[s_])
+                    break
+            extreme = float(b.l[t:e + 1].min())
+            if not extreme < need or broken or not prox < dist:
                 continue
-            prior = [s for s in sw_lo if s < i - 1]
-            breakout = bool(prior) and extreme < b.l[prior[-1]] and b.l[prior[-1]] < prox
-            form = "RBD" if leg_in > 0 else "DBD"
-            kind_name = "supply"
-        height = abs(prox - dist)
-        if height <= 0:
-            i = j + 1
-            continue
-        move = abs(extreme - prox) / height
-        z = Zone(kind_name, form, float(prox), float(dist), i, j, k, j - i + 1, float(move), bool(breakout))
-        _freshness(z, b, k + 1)
+            form, kind_name, opp_kind = ("RBD" if reversal else "DBD"), "supply", "demand"
+        # breakout: past the nearest opposing zone that was still live at the leg-out
+        opp = None
+        for o in zones:
+            if o.kind != opp_kind or o.base_end + 1 >= t:
+                continue
+            if (out > 0 and not o.proximal > prox) or (out < 0 and not o.proximal < prox):
+                continue
+            seen = slice(o.leg_out_end + 1, t)
+            if o.kind == "supply":
+                gone = seen.start < seen.stop and (b.h if wick else b.c)[seen].max() > o.distal
+            else:
+                gone = seen.start < seen.stop and (b.l if wick else b.c)[seen].min() < o.distal
+            if gone:
+                continue
+            if opp is None or abs(o.proximal - prox) < abs(opp.proximal - prox):
+                opp = o
+        breakout = opp is not None and (extreme > opp.distal if out > 0 else extreme < opp.distal)
+        move = abs(extreme - prox) / abs(prox - dist)
+        z = Zone(kind_name, form, prox, dist, i, j, e, nb, float(move), bool(breakout))
+        _freshness(z, b, e + 1, wick)
         zones.append(z)
-        i = j + 1
     return zones
 
 
-def _freshness(z: Zone, b: Bars, start: int) -> None:
+def _freshness(z: Zone, b: Bars, start: int, wick: bool = True) -> None:
     """How deep price came back into the zone after leaving it, before the current visit.
 
-    A close beyond the distal line violates the zone. The current visit (the
-    run of latest bars that trade into the zone) is the trade being planned,
-    so it does not count against freshness.
+    A trade beyond the distal line (a close, if ``wick`` is False) violates the
+    zone. The current visit (the run of latest bars that trade into the zone)
+    is the trade being planned, so it does not count against freshness.
     """
     n = len(b)
     if start >= n:
         return
     if z.kind == "demand":
         inside = b.l[start:] <= z.proximal
-        if (b.c[start:] < z.distal).any():
+        if ((b.l if wick else b.c)[start:] < z.distal).any():
             z.violated = True
             return
     else:
         inside = b.h[start:] >= z.proximal
-        if (b.c[start:] > z.distal).any():
+        if ((b.h if wick else b.c)[start:] > z.distal).any():
             z.violated = True
             return
     m = len(inside)
@@ -289,6 +320,27 @@ def _freshness(z: Zone, b: Bars, start: int) -> None:
     else:
         deepest = b.h[before].max()
         z.penetration = float(max(0.0, (deepest - z.proximal) / z.height))
+
+
+def zone_ladder(zones: list[Zone], kind: str, depth: int = 2, min_strength: float = 1.0) -> list[Zone]:
+    """The immediate zone and the ones beyond it, nearest first (manual's zoning process, slides 140-145).
+
+    Start at the current price and look down (demand) or up (supply): the first
+    live zone with a strong enough move out is the *immediate* zone; the 2nd is
+    the next live zone beyond it that does not overlap it, and so on. Live
+    demand always sits below price and live supply above, because price
+    trading through the distal line violates a zone.
+    """
+    live = [z for z in zones if z.kind == kind and not z.violated and z.strength >= min_strength]
+    live.sort(key=lambda z: -z.proximal if kind == "demand" else z.proximal)
+    out: list[Zone] = []
+    for z in live:
+        if len(out) >= depth:
+            break
+        if out and (z.proximal >= out[-1].distal if kind == "demand" else z.proximal <= out[-1].distal):
+            continue  # overlaps the zone before it
+        out.append(z)
+    return out
 
 
 # --------------------------------------------------------------------------- trend
@@ -454,6 +506,7 @@ def score_demand(z: Zone, ltf: Bars, zones: list[Zone], tr: Trend, cv: Curve, ht
     entry = z.proximal
     stop = z.distal - stop_buffer
     risk = entry - stop
+    # the immediate supply above (the 2nd if the immediate one sits below the entry); monthly supply if none
     above = [s.proximal for s in zones if s.kind == "supply" and not s.used_up and s.proximal > max(entry, price)]
     target_zone = min(above) if above else None
     if target_zone is None:
@@ -476,21 +529,35 @@ def score_demand(z: Zone, ltf: Bars, zones: list[Zone], tr: Trend, cv: Curve, ht
 class Analysis:
     """What the method sees in one stock at one moment."""
 
-    setups: list[Setup]  # active demand zones below or around price, best first
-    supply_above: list[Zone]
+    setups: list[Setup]  # the immediate and 2nd demand zones below price, scored, best first
+    supply_above: list[Zone]  # the immediate and 2nd supply zones above price, nearest first
     trend: Trend
     curve: Curve
     atr: float
     price: float
+    demand_zones: list[Zone] = field(default_factory=list)  # the immediate and 2nd demand zones, nearest first
 
     @property
     def best(self) -> Setup | None:
         return self.setups[0] if self.setups else None
 
+    @property
+    def supply_zones(self) -> list[Zone]:
+        return self.supply_above
 
-def analyze(daily: pd.DataFrame, ltf_lookback: int = 260, itf_lookback: int = 780, htf_lookback: int = 2520,
-            stop_atr: float = 0.10, htf_cache: dict | None = None, cache_key=None) -> Analysis | None:
-    """Run the 6-step plan's analysis on one stock's daily bars (already point-in-time)."""
+    def setup_for(self, zone: Zone) -> Setup | None:
+        return next((s for s in self.setups if s.zone is zone), None)
+
+
+def analyze(daily: pd.DataFrame, ltf_lookback: int = 1000, itf_lookback: int = 780, htf_lookback: int = 2520,
+            stop_atr: float = 0.10, htf_cache: dict | None = None, cache_key=None, depth: int = 2,
+            min_strength: float = 1.0) -> Analysis | None:
+    """Run the 6-step plan's analysis on one stock's daily bars (already point-in-time).
+
+    Like the manual's zoning process (and the TradingView indicator), only the
+    immediate demand zone below price and the 2nd one beyond it are scored as
+    setups, and the immediate (then 2nd) supply zone above caps the profit.
+    """
     if len(daily) < 120:
         return None
     ltf = Bars.from_frame(daily.iloc[-ltf_lookback:])
@@ -514,12 +581,11 @@ def analyze(daily: pd.DataFrame, ltf_lookback: int = 260, itf_lookback: int = 78
     htf_supply = [z for z in find_zones(htf_done) if z.kind == "supply" and not z.used_up] if len(htf_done) else []
     zones = find_zones(ltf)
     buffer = stop_atr * a
-    demand = [z for z in zones if z.kind == "demand" and not z.violated and z.proximal <= price * 1.10]
-    setups = [score_demand(z, ltf, zones, tr, cv, htf_supply, buffer, price) for z in demand]
+    demand = zone_ladder(zones, "demand", depth, min_strength)
+    supply = zone_ladder(zones, "supply", depth, min_strength)
+    setups = [score_demand(z, ltf, supply, tr, cv, htf_supply, buffer, price) for z in demand]
     setups.sort(key=lambda s: (-s.score, -s.zone.proximal))
-    supply = sorted((z for z in zones if z.kind == "supply" and not z.used_up and z.proximal > price),
-                    key=lambda z: z.proximal)
-    return Analysis(setups, supply, tr, cv, a, price)
+    return Analysis(setups, supply, tr, cv, a, price, demand)
 
 
 # --------------------------------------------------------------------------- strategy

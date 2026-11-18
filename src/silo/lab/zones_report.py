@@ -1,8 +1,9 @@
 """Supply and demand zones today, per stock, as an HTML page for the dashboard.
 
-For each stock: the latest close, the best demand zone below (where the
-Core Strategy would buy), the nearest supply zone above (where it would take
-profit, and which decides whether the trade has room for 1:4), and a plain
+For each stock: the latest close, the immediate and 2nd demand zones below
+(where the Core Strategy would buy), the immediate and 2nd supply zones above
+(where it would take profit; the immediate one decides whether the trade has
+room for 1:4), and a plain
 verdict: in the buy zone, wait for a pull-back, supply too close, or no trade.
 A small chart draws the last year of closes with demand zones in green and
 supply zones in red. Research only: nothing here places an order.
@@ -16,7 +17,9 @@ from dataclasses import dataclass
 
 import pandas as pd
 
-from silo.strategies.core_zones import Bars, Zone, analyze, find_zones
+from silo.strategies.core_zones import Zone, analyze
+
+ANALYZE_BARS = 1000  # analyze()'s default ltf_lookback: zones' bar positions count from there
 
 DISCLAIMER = "Research only. Simulated analysis of past prices; not investment advice."
 
@@ -33,9 +36,10 @@ class ZoneRow:
     stop: float | None
     supply: tuple[float, float] | None  # nearest active supply above: (proximal, distal)
     reward_risk: float | None
-    demand_zones: list[Zone]
-    supply_zones: list[Zone]
+    demand_zones: list[Zone]  # immediate, then 2nd demand below the price
+    supply_zones: list[Zone]  # immediate, then 2nd supply above the price
     closes: list[float]
+    offset: int = 0  # bar position of closes[0] in the bars the zones were found on
 
 
 def zone_row(symbol: str, daily: pd.DataFrame, min_reward_risk: float = 4.0, min_score: float = 7.0,
@@ -45,12 +49,10 @@ def zone_row(symbol: str, daily: pd.DataFrame, min_reward_risk: float = 4.0, min
     if a is None:
         return None
     window = daily.iloc[-lookback:]
-    zones = find_zones(Bars.from_frame(window))
-    demand = [z for z in zones if z.kind == "demand" and not z.violated]
-    supply = [z for z in zones if z.kind == "supply" and not z.used_up]
+    demand, supply = a.demand_zones, a.supply_above
     close = a.price
-    above = sorted((z for z in supply if z.proximal > close), key=lambda z: z.proximal)
-    nearest = (above[0].proximal, above[0].distal) if above else None
+    nearest = (supply[0].proximal, supply[0].distal) if supply else None
+    offset = min(len(daily), ANALYZE_BARS) - len(window)
     st = a.best
     score = buy_at = stop = rr = None
     if st is None:
@@ -75,7 +77,7 @@ def zone_row(symbol: str, daily: pd.DataFrame, min_reward_risk: float = 4.0, min
             verdict = "wait for pull-back"
             detail = f"buy zone {z.proximal:.2f} is {100 * (close / z.proximal - 1):.1f}% below the price"
     return ZoneRow(symbol, str(pd.Timestamp(daily.index[-1]).date()), close, verdict, detail, score, buy_at, stop,
-                   nearest, rr, demand, supply, [float(x) for x in window["close"]])
+                   nearest, rr, demand, supply, [float(x) for x in window["close"]], offset)
 
 
 def _chart(r: ZoneRow, w: int = 360, h: int = 120) -> str:
@@ -94,7 +96,7 @@ def _chart(r: ZoneRow, w: int = 360, h: int = 120) -> str:
     rects = []
     for z, cls in [(z, "demand") for z in r.demand_zones] + [(z, "supply") for z in r.supply_zones]:
         top, bot = max(z.proximal, z.distal), min(z.proximal, z.distal)
-        x0 = x(z.base_start)
+        x0 = x(max(z.base_start - r.offset, 0))
         rects.append(f"<rect class='{cls}' x='{x0:.1f}' y='{y(top):.1f}' width='{w - x0:.1f}' "
                      f"height='{max(y(bot) - y(top), 1):.1f}'/>")
     pts = " ".join(f"{x(i):.1f},{y(v):.1f}" for i, v in enumerate(r.closes))
@@ -117,16 +119,21 @@ ORDER = {"in buy zone": 0, "wait for pull-back": 1, "supply too close": 2, "no t
 def write_zones_report(rows: list[ZoneRow], path) -> None:
     rows = sorted(rows, key=lambda r: (ORDER.get(r.verdict, 9), -(r.score or 0), r.symbol))
     counts = {k: sum(r.verdict == k for r in rows) for k in ORDER}
-    with_supply = sum(bool([z for z in r.supply_zones if z.proximal > r.close]) for r in rows)
+    with_supply = sum(bool(r.supply_zones) for r in rows)
+
+    def band(zs, i):
+        return f"{zs[i].proximal:.2f}–{zs[i].distal:.2f}" if len(zs) > i else "none"
+
     body = []
     for r in rows:
-        sup = f"{r.supply[0]:.2f}–{r.supply[1]:.2f}" if r.supply else "none in the last year"
+        sup = f"1st {band(r.supply_zones, 0)}<br>2nd {band(r.supply_zones, 1)}"
+        dem = f"1st {band(r.demand_zones, 0)}<br>2nd {band(r.demand_zones, 1)}"
         body.append(
             f"<tr><td><b>{html.escape(r.symbol)}</b><br><span class='muted'>{r.date}</span></td>"
             f"<td>{r.close:.2f}</td><td class='v {r.verdict.replace(' ', '-')}'>{r.verdict}<br>"
             f"<span class='muted'>{html.escape(r.detail)}</span></td><td>{_num(r.score, '{:.1f}')}</td>"
             f"<td>{_num(r.buy_at)}</td><td>{_num(r.stop)}</td><td>{sup}</td><td>{_num(r.reward_risk, '{:.1f}')}</td>"
-            f"<td>{len(r.demand_zones)} / {len(r.supply_zones)}</td><td>{_chart(r)}</td></tr>")
+            f"<td>{dem}</td><td>{_chart(r)}</td></tr>")
     summary = " · ".join(f"{v} {k}" for k, v in counts.items())
     page = f"""<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width'>
 <title>Supply and demand zones</title><style>
@@ -140,11 +147,12 @@ vertical-align:top}}.muted{{color:var(--muted);font-size:12px}}.v{{font-weight:6
 rect.supply{{fill:var(--sup)}}polyline.px{{fill:none;stroke:var(--px);stroke-width:1.2}}
 .wrap{{overflow-x:auto}}</style></head><body>
 <h1>Supply and demand zones</h1><p class='muted'>{DISCLAIMER}</p>
-<p>{len(rows)} stocks: {summary}. {with_supply} have an active supply zone above the price.
-Green bands are demand (where the rules buy), red bands are supply (where they take profit). A buy needs room
-to the nearest supply of at least 4x the risk.</p>
+<p>{len(rows)} stocks: {summary}. {with_supply} have a live supply zone above the price.
+For each stock: the immediate and 2nd demand zones below the price (green, where the rules buy) and the
+immediate and 2nd supply zones above it (red, where they take profit). A buy needs room to the immediate
+supply of at least 4x the risk.</p>
 <div class='wrap'><table><thead><tr><th>Stock</th><th>Close</th><th>Verdict</th><th>Score</th><th>Buy at</th>
-<th>Stop</th><th>Next supply</th><th>Reward:risk</th><th>Zones (demand / supply)</th><th>Last year</th></tr></thead>
+<th>Stop</th><th>Supply above</th><th>Reward:risk</th><th>Demand below</th><th>Last year</th></tr></thead>
 <tbody>{''.join(body)}</tbody></table></div></body></html>"""
     from pathlib import Path
 

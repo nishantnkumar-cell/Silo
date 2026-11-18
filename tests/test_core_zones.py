@@ -37,7 +37,49 @@ DBR = [
 
 def test_candles_are_legs_or_bases():
     k = candle_kinds(bars(DBR))
-    assert list(k[:7]) == [-1, -1, 0, 0, 1, 1, 1]
+    assert list(k[:7]) == [0, -1, 0, 0, 1, 1, 1]  # the first candle has nothing before it
+
+
+def test_leg_candle_must_close_outside_the_previous_range():
+    # a big green body that closes inside the previous candle's range is a base, not a leg (slides 79-80)
+    rows = [(100, 110, 99, 109), (100.5, 108, 100, 107.5)]
+    assert list(candle_kinds(bars(rows))) == [0, 0]
+    # a gap up counts: it closes above the previous high and near its own top
+    rows = [(100, 101, 99, 100.5), (103, 104, 102.8, 103.9)]
+    assert list(candle_kinds(bars(rows))) == [0, 1]
+
+
+def test_move_out_must_make_a_new_high_past_the_last_swing():
+    # a swing high at 120 before the drop; the rally out of the base stops at 115: not explosive (slide 74)
+    rows = [(100, 101, 99, 100.5), (100.5, 110, 100.4, 109.8), (109.8, 120, 109.6, 119.8), (119.8, 119.9, 114, 115),
+            (115, 115.5, 113, 113.5), (113.5, 114, 104, 104.5), (104.5, 105, 100, 100.5), (100.5, 101.5, 99.8, 101),
+            (101, 101.8, 100.2, 100.8), (100.8, 108, 100.7, 107.8), (107.8, 115, 107.6, 114.9), (114.9, 115, 112, 112.5)]
+    assert not [z for z in find_zones(bars(rows)) if z.kind == "demand" and z.base_start == 7]
+    # the same rally carried on to 125 takes out the swing: now it is a zone
+    rows2 = rows[:11] + [(114.9, 125, 114.8, 124.8), (124.8, 125, 122, 122.5)]
+    assert [z for z in find_zones(bars(rows2)) if z.kind == "demand" and z.base_start == 7]
+
+
+def test_a_wick_through_the_distal_line_violates_the_zone():
+    wicked = DBR + [(111, 111, 99, 103)]  # trades below 99.5 but closes back inside
+    assert [z for z in find_zones(bars(wicked)) if z.kind == "demand"][0].violated
+    assert not [z for z in find_zones(bars(wicked), wick=False) if z.kind == "demand"][0].violated
+
+
+def test_zone_ladder_gives_the_immediate_and_second_zone_without_overlap():
+    from silo.strategies.core_zones import Zone, zone_ladder
+
+    def dz(p, d):
+        return Zone("demand", "DBR", p, d, 0, 0, 0, 1, 3.0, True)
+
+    def sz(p, d):
+        return Zone("supply", "RBD", p, d, 0, 0, 0, 1, 3.0, True)
+
+    zs = [dz(90, 88), dz(95, 93), dz(94, 92.5), dz(80, 78), sz(110, 112), sz(111, 113), sz(120, 122)]
+    assert [z.proximal for z in zone_ladder(zs, "demand")] == [95, 90]  # 94 overlaps the immediate zone
+    assert [z.proximal for z in zone_ladder(zs, "supply")] == [110, 120]
+    weak = Zone("demand", "DBR", 99, 97, 0, 0, 0, 1, 1.0, False)  # strength 0: not a very strong move out
+    assert zone_ladder(zs + [weak], "demand")[0].proximal == 95
 
 
 def test_drop_base_rally_zone_lines_and_scores():
@@ -116,7 +158,8 @@ def test_core_desk_keeps_original_desk_prompts_unchanged(tables):
     assert plain.header == HEADER and len(next(iter(plain.rows.values()))) == 9
     core = CoreDesk(syms).brief(view)
     assert core.header.startswith(HEADER + " | zone score")
-    assert all(len(v) == 15 for v in core.rows.values())
+    assert all(len(v) == 18 for v in core.rows.values())  # 9 + 6 zone readings + 2nd demand, 1st and 2nd supply
+    assert "2nd demand" in core.header and "2nd supply" in core.header
     assert "demand zone" in RULEBOOK
 
 
