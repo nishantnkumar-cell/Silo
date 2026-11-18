@@ -113,7 +113,7 @@ silo demo                                   # offline, synthetic data
 
 # UK workflow
 silo fetch --universe uk                    # ~70 London stocks, prices in pounds
-silo universe uk --quality --save uk.json   # liquid, healthy volatility, good fundamentals
+silo universe uk --quality --save uk.json   # liquid, in an uptrend, ranked by momentum, good fundamentals
 silo lab $(python -c "import json;print(' '.join(json.load(open('uk.json'))))") --strategy uk_trend
 silo paper new uk-trend --symbols-file uk.json --strategy uk_trend
 silo paper run uk-trend --fetch             # once a day after 16:35 London time
@@ -139,6 +139,30 @@ pytest
 ```
 
 `silo fetch --source stooq` is a fallback when Yahoo rate-limits.
+
+## The wider pool: every UK and US share on Trading 212
+
+`silo pool instruments` reads Trading 212 Practice's instrument list (names
+and codes only, no prices), keeps ordinary shares listed in London or New
+York, drops repeats and US ADRs of London companies, saves a dated snapshot
+and writes `pool/uk-candidates.json` and `pool/us-candidates.json`. Prices
+then come from Yahoo, and `silo universe` gates and ranks them:
+
+```
+silo pool instruments
+silo fetch --symbols-file pool/us-candidates.json --pause 1   # slow, run once on the PN50
+silo universe us --candidates pool/us-candidates.json --top 60 --sector-cap --save us.json
+silo league new --symbols-file us.json --prefix us              # a separate US book
+```
+
+Gate: ordinary shares, at least £1 / $5, a median £5m / $20m a day traded,
+a year of history, volatility under 60% a year. Trend: above the 200-day
+average and within 25% of the 52-week high. Rank: 12-month return skipping
+the latest month, calmer names first on ties. `--sector-cap` keeps any one
+sector to a quarter of the picks (today's sectors, so live use only). US books
+pay the 0.15% FX fee each way and have 15% US tax withheld from dividends.
+Today's Trading 212 list only holds survivors, so backtests on it are
+flattered; forward paper trading is the honest test. Research only.
 
 ## Daily book: silver ETFs and crypto
 

@@ -70,7 +70,7 @@ class PaperBook:
             raise FileExistsError(f"paper book {self.name!r} already exists")
         market = market_for_symbols(symbols)
         constraints = constraints or Constraints.position_trading(liquidity=Liquidity.for_market(market.code))
-        costs = costs or CostModel.for_market(market.code)
+        costs = costs or CostModel.for_uk_investor(market.code)
         tables = {s: vault.get_bars(s) for s in symbols}
         start_after = max(df.index[-1] for df in tables.values())
         cfg = {

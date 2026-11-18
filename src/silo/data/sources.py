@@ -37,12 +37,36 @@ def crypto_volume_to_units(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+_YF_CACHE_SET = False
+
+
+def _private_yf_cache(yf) -> None:  # pragma: no cover - needs yfinance
+    """Give this process its own yfinance timezone cache.
+
+    yfinance keeps one SQLite cache per user. A fetch that dies mid-write can
+    corrupt it ("database disk image is malformed"), and then every Yahoo
+    request on the machine fails, including other Silo jobs. A throwaway
+    per-process folder costs a few extra lookups and isolates each run.
+    """
+    global _YF_CACHE_SET
+    if _YF_CACHE_SET:
+        return
+    import tempfile
+
+    try:
+        yf.set_tz_cache_location(tempfile.mkdtemp(prefix="silo-yf-"))
+    except Exception:  # noqa: BLE001 - older yfinance: keep its default
+        pass
+    _YF_CACHE_SET = True
+
+
 def fetch_yfinance(symbol: str, start: str = "2010-01-01") -> pd.DataFrame:
     """Daily bars from Yahoo Finance, normalized (pence converted for ``.L``)."""
     try:
         import yfinance as yf
     except ImportError as exc:  # pragma: no cover - depends on optional extra
         raise RuntimeError("install the data extra: pip install 'silo[data]'") from exc
+    _private_yf_cache(yf)
     df = yf.download(
         symbol, start=start, auto_adjust=False, actions=True, progress=False, multi_level_index=False
     )
