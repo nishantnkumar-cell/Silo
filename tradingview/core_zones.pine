@@ -14,7 +14,7 @@
 //                    (demand) / lowest (supply) candle BODY in the base (the preferred setting). Distal at the
 //                    lowest (highest) price of the whole DBR / RBD, or of the base and move out for RBR / DBD.
 //   Zoning [140-145] start at current price, look down (up) and left until you find the explosive move:
-//                    only the IMMEDIATE demand below and supply above price are drawn.
+//                    the IMMEDIATE demand below and supply above price, plus the 2nd zone beyond each.
 //   Refining [312]   the Refining Time Frame (RTF) is used to refine the proximal and distal lines. The manual
 //                    lists it as optional and leaves the method to the XLT, so this is our reading: on the RTF,
 //                    find the turning point inside the zone (lowest low for demand, highest high for supply),
@@ -49,6 +49,8 @@ doRefine = input.bool(true, "Refine the proximal line on a lower time frame", gr
 rtf      = input.timeframe("60", "Refining time frame", group = grpR,
      tooltip = "Must be lower than the chart. 60 minutes on a daily chart. The zone keeps its daily lines when there is no lower time frame data that far back.")
 showRaw  = input.bool(true, "Also outline the unrefined daily zone", group = grpR)
+show2nd  = input.bool(true, "Also draw the 2nd demand below and 2nd supply above", group = grpZ,
+     tooltip = "The next zone beyond the immediate one, not overlapping it: where price may turn if the immediate zone fails (demand), or the next target after the immediate supply.")
 
 grpT = "Higher time frames"
 trendTf = input.timeframe("W", "Trend time frame (ITF)", group = grpT)
@@ -458,11 +460,11 @@ int tDir = nz(tDirRaw, 0)
 var array<box>   boxes  = array.new<box>()
 var array<line>  lines  = array.new<line>()
 var array<label> labels = array.new<label>()
-var table info = table.new(position.top_right, 2, 6, bgcolor = color.new(color.black, 85), border_width = 1)
+var table info = table.new(position.top_right, 2, 8, bgcolor = color.new(color.black, 85), border_width = 1)
 
-f_drawZone(Zone z, string txt, color col, array<box> bx) =>
+f_drawZone(Zone z, string txt, color col, array<box> bx, int tp) =>
     bx.push(box.new(z.baseStart, math.max(z.prox, z.dist), bar_index + extendBars, math.min(z.prox, z.dist),
-         border_color = col, bgcolor = color.new(col, 75), text = txt, text_size = size.small,
+         border_color = col, bgcolor = color.new(col, tp), text = txt, text_size = size.small,
          text_color = color.new(col, 0), text_halign = text.align_right, text_valign = text.align_center))
     if showRaw and z.refined
         bx.push(box.new(z.baseStart, math.max(z.proxRaw, z.dist), bar_index + extendBars, math.min(z.proxRaw, z.dist),
@@ -488,6 +490,16 @@ if barstate.islast
                 dz := z
             if not z.demand and (na(sz) or z.prox < sz.prox)
                 sz := z
+    // the 2nd zones: next live zone beyond the immediate one, not overlapping it
+    Zone dz2 = na
+    Zone sz2 = na
+    if show2nd
+        for z in zones
+            if z.valid and z.strength() >= minStr
+                if z.demand and not na(dz) and z.prox < dz.dist and (na(dz2) or z.prox > dz2.prox)
+                    dz2 := z
+                if not z.demand and not na(sz) and z.prox > sz.dist and (na(sz2) or z.prox < sz2.prox)
+                    sz2 := z
 
     float buf = stopAtr * atrD
     string dTxt = "none"
@@ -498,7 +510,7 @@ if barstate.islast
         string howD = dz.refined ? "refined on " + rtf : "not refined"
         dTxt := dz.fm + " " + f_num(sc) + "/10, " + howD
         f_drawZone(dz, "Demand " + dz.fm + "  " + f_num(sc) + "/10" + (dz.inZone ? "  price in zone" : "") +
-             "\n" + f_parts(st, tm, fr, trS, cvS, pzS) + "  (" + howD + ")", colDem, boxes)
+             "\n" + f_parts(st, tm, fr, trS, cvS, pzS) + "  (" + howD + ")", colDem, boxes, 75)
         if showPlan
             float risk = dz.prox - stop
             float tgt = na(oppD) ? dz.prox + minRR * risk : dz.prox + targetPct * (oppD - dz.prox)
@@ -531,7 +543,7 @@ if barstate.islast
         string howS = sz.refined ? "refined on " + rtf : "not refined"
         sTxt := sz.fm + " " + f_num(sc2) + "/10, " + howS
         f_drawZone(sz, "Supply " + sz.fm + "  " + f_num(sc2) + "/10" + (sz.inZone ? "  price in zone" : "") +
-             "\n" + f_parts(st2, tm2, fr2, trS2, cvS2, pzS2) + "  (" + howS + ")", colSup, boxes)
+             "\n" + f_parts(st2, tm2, fr2, trS2, cvS2, pzS2) + "  (" + howS + ")", colSup, boxes, 75)
         if high >= sz.prox
             alert(syminfo.ticker + ": price is in the immediate supply zone (" + f_num(sc2) + "/10). Research only.", alert.freq_once_per_bar_close)
     else if showHtf and not na(hSP) and hSP > close
@@ -539,6 +551,23 @@ if barstate.islast
         boxes.push(box.new(bar_index - 60, math.max(hSP, hSD), bar_index + extendBars, math.min(hSP, hSD), border_color = colSup,
              border_style = line.style_dashed, bgcolor = color.new(colSup, 90), text = "No daily supply left: nearest " + curveTf + " supply",
              text_size = size.small, text_color = colSup, text_halign = text.align_right))
+
+    string d2Txt = show2nd ? "none" : "off"
+    string s2Txt = show2nd ? "none" : "off"
+    if not na(dz2)
+        float oppD2 = not na(sz) ? sz.prox : (not na(hSP) and hSP > dz2.prox ? hSP : na)
+        [sc3, st3, tm3, fr3, trS3, cvS3, pzS3, stop3, rr3, dec3] = f_score(dz2, oppD2, buf, tDir, cLo, cHi)
+        string how3 = dz2.refined ? "refined on " + rtf : "not refined"
+        d2Txt := dz2.fm + " " + f_num(sc3) + "/10, " + how3
+        f_drawZone(dz2, "2nd demand " + dz2.fm + "  " + f_num(sc3) + "/10\n" + f_parts(st3, tm3, fr3, trS3, cvS3, pzS3) + "  (" + how3 + ")",
+             colDem, boxes, 88)
+    if not na(sz2)
+        float oppS2 = not na(dz) ? dz.prox : (not na(hDP) and hDP < sz2.prox ? hDP : na)
+        [sc4, st4, tm4, fr4, trS4, cvS4, pzS4, stop4, rr4, dec4] = f_score(sz2, oppS2, buf, tDir, cLo, cHi)
+        string how4 = sz2.refined ? "refined on " + rtf : "not refined"
+        s2Txt := sz2.fm + " " + f_num(sc4) + "/10, " + how4
+        f_drawZone(sz2, "2nd supply " + sz2.fm + "  " + f_num(sc4) + "/10\n" + f_parts(st4, tm4, fr4, trS4, cvS4, pzS4) + "  (" + how4 + ")",
+             colSup, boxes, 88)
 
     string tLbl = tDir > 0 ? "up" : tDir < 0 ? "down" : "sideways"
     float cLoc = not na(cLo) and not na(cHi) and cHi > cLo ? (close - cLo) / (cHi - cLo) : na
@@ -553,5 +582,9 @@ if barstate.islast
     table.cell(info, 1, 3, sTxt, text_color = color.white, text_size = size.small)
     table.cell(info, 0, 4, "Immediate demand", text_color = color.white, text_size = size.small)
     table.cell(info, 1, 4, dTxt, text_color = color.white, text_size = size.small)
+    table.cell(info, 0, 6, "2nd supply", text_color = color.white, text_size = size.small)
+    table.cell(info, 1, 6, s2Txt, text_color = color.white, text_size = size.small)
+    table.cell(info, 0, 7, "2nd demand", text_color = color.white, text_size = size.small)
+    table.cell(info, 1, 7, d2Txt, text_color = color.white, text_size = size.small)
     table.cell(info, 0, 5, "Refining TF", text_color = color.white, text_size = size.small)
     table.cell(info, 1, 5, canRefine ? rtf : "off (must be below the chart TF)", text_color = color.white, text_size = size.small)
