@@ -41,6 +41,14 @@ silo backtest <symbols...> --strategy engine
 silo backtest <symbols...> --strategy engine --params '{"risk_per_trade": 0.02, "market": "ISF.L"}'
 ```
 
+In a league backtest, pass settings per contestant:
+`silo league backtest --symbols ... --only engine --params '{"engine": {"stop_atr": 4}}' --twins 20 --tracker ISF.L`.
+There the market filter uses an equal-weight index of the universe unless the market symbol is also in `--symbols`.
+
+Buy-and-hold in `silo backtest` runs without position-trading constraints, as in the league: under them the
+liquidity gate refused half the names on day one and left 50% in cash for 14 years (+100% instead of +382%,
+2012-2026).
+
 Include the market symbol (ISF.L for UK, SPY for US) in the symbol list when you
 pass `market`; it is used for the filter and never traded. Books and CLI runs keep
 `Constraints.position_trading()` and the liquidity rules.

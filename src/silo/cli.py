@@ -153,8 +153,15 @@ def _demo_tables(n=4, n_days=2000):
 
 def _run_all(tables, symbols, names, start=None, end=None, params=None, **rules) -> dict[str, dict[str, float]]:
     params = params or {}  # settings for the named strategy, e.g. {"engine": {"risk_per_trade": 0.02}}
-    return {n: run_backtest(REGISTRY[n](symbols, **params.get(n, {})), tables, start=start, end=end, **rules).metrics()
-            for n in names}
+    out = {}
+    for n in names:
+        kw = dict(rules)
+        if n == "buy_and_hold":
+            # the benchmark buys every name once and holds, as in `silo league backtest`: position-trading
+            # constraints would gate it once on day one and leave the rest in cash for good
+            kw["constraints"] = None
+        out[n] = run_backtest(REGISTRY[n](symbols, **params.get(n, {})), tables, start=start, end=end, **kw).metrics()
+    return out
 
 
 def cmd_backtest(args) -> int:
@@ -532,6 +539,13 @@ def _league_backtest(args, vault) -> int:
     tables = vault.tables(symbols)
     symbols = [s for s in symbols if len(tables[s]) > 260]
     names = args.only or (RULE_CONTESTANTS + (AI_CONTESTANTS if args.with_ai else []))
+    if args.params:  # per-contestant settings for this run only, e.g. {"engine": {"stop_atr": 4}}
+        from silo.league import PARAMS
+
+        for name, extra in json.loads(args.params).items():
+            if name not in REGISTRY:
+                raise SystemExit(f"--params names an unknown contestant: {name}")
+            PARAMS[name] = {**PARAMS.get(name, {}), **extra}
     if any(REGISTRY[n].uses_llm for n in names):
         if not os.environ.get("SILO_LLM"):
             print("AI contestants need SILO_LLM (e.g. ollama:qwen2.5:7b)")
@@ -982,6 +996,7 @@ def main(argv: list[str] | None = None) -> int:
     lg.add_argument("--all-candidates", action="store_true",
                     help="backtest: every UK candidate with data, instead of today's screened list (less look-ahead)")
     lg.add_argument("--out", default="reports/league", help="backtest: folder for league.html and league.json")
+    lg.add_argument("--params", help="backtest: JSON settings per contestant, e.g. '{\"engine\": {\"stop_atr\": 4}}'")
     lg.add_argument("--title", default="League backtest")
     lg.add_argument("--twins", type=int, default=20,
                     help="backtest: matched random twins per contestant for the luck check (0 to skip)")

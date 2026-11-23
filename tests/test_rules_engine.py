@@ -107,3 +107,14 @@ def test_same_data_same_trades(up_tables):
     pd.testing.assert_frame_equal(runs[0].fills, runs[1].fills)
     assert np.allclose(runs[0].equity.to_numpy(), runs[1].equity.to_numpy())
     assert len(runs[0].fills)  # it actually traded
+
+
+def test_backtest_benchmark_ignores_position_rules(up_tables):
+    """`silo backtest` buy-and-hold must match the league benchmark, not sit in cash behind the liquidity gate."""
+    from silo.cli import _run_all
+    from silo.liquidity import Liquidity
+
+    strict = Constraints.position_trading(liquidity=Liquidity(min_value_traded=1e12))  # blocks every name
+    gated = _run_all(up_tables, list(up_tables), ["buy_and_hold"], constraints=strict)
+    free = run_backtest(REGISTRY["buy_and_hold"](list(up_tables)), up_tables)
+    assert gated["buy_and_hold"]["total_return"] == pytest.approx(free.metrics()["total_return"])
