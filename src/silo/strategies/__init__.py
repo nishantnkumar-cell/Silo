@@ -15,6 +15,7 @@ from silo.strategies.core_zones import CoreManaged, CoreZones, CoreZonesTrail
 from silo.strategies.crossasset import MacroTilt, SectorMomentum
 from silo.strategies.news import DirectorBuys, NewsMomentum, ResultsDrift
 from silo.strategies.random_entry import RandomEntry
+from silo.strategies.rules_engine import RulesEngine
 
 REGISTRY = {
     "buy_and_hold": BuyAndHold,
@@ -35,6 +36,7 @@ REGISTRY = {
     "core_trail": CoreZonesTrail,
     "core_managed": CoreManaged,
     "random": RandomEntry,
+    "engine": RulesEngine,
 }
 
 from silo.agents.blend import Blend, BlendEqual, SiloAgent  # noqa: E402 - these build members from REGISTRY
@@ -71,4 +73,5 @@ __all__ = [
     "TrendVolTarget",
     "CoreZones",
     "RandomEntry",
+    "RulesEngine",
 ]
