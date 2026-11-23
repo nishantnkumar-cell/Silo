@@ -151,15 +151,23 @@ def _demo_tables(n=4, n_days=2000):
     return symbols, tables | synthetic_macro(tables[symbols[0]].index)
 
 
-def _run_all(tables, symbols, names, start=None, end=None, **rules) -> dict[str, dict[str, float]]:
-    return {n: run_backtest(REGISTRY[n](symbols), tables, start=start, end=end, **rules).metrics() for n in names}
+def _run_all(tables, symbols, names, start=None, end=None, params=None, **rules) -> dict[str, dict[str, float]]:
+    params = params or {}  # settings for the named strategy, e.g. {"engine": {"risk_per_trade": 0.02}}
+    return {n: run_backtest(REGISTRY[n](symbols, **params.get(n, {})), tables, start=start, end=end, **rules).metrics()
+            for n in names}
 
 
 def cmd_backtest(args) -> int:
     vault = DataVault(args.data_dir)
     tables = vault.tables(args.symbols)
     names = _everything() if args.strategy == "all" else ["buy_and_hold", args.strategy]
-    _print_table(_run_all(tables, args.symbols, names, args.start, args.end, **_rules(args, args.symbols)))
+    params = {}
+    if args.params:
+        if args.strategy == "all":
+            raise SystemExit("--params needs a single --strategy")
+        params = {args.strategy: json.loads(args.params)}
+    _print_table(_run_all(tables, args.symbols, names, args.start, args.end, params=params,
+                          **_rules(args, args.symbols)))
     return 0
 
 
@@ -892,6 +900,7 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("--strategy", choices=["all", *REGISTRY], default="all")
     b.add_argument("--start")
     b.add_argument("--end")
+    b.add_argument("--params", help="JSON settings for --strategy, e.g. '{\"risk_per_trade\": 0.02}' for the engine")
     _add_rule_flags(b)
     b.set_defaults(func=cmd_backtest)
 
